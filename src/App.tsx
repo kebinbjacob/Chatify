@@ -228,9 +228,15 @@ function ChatScreen({ session }: { session: any }) {
   const [recordingDuration, setRecordingDuration] = useState(0);
   const [searchQuery, setSearchQuery] = useState('');
   const [showUserInfo, setShowUserInfo] = useState(false);
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [editedBio, setEditedBio] = useState('');
+  const [avatarFile, setAvatarFile] = useState<File | null>(null);
+  const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
+  const [isUpdatingProfile, setIsUpdatingProfile] = useState(false);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const avatarInputRef = useRef<HTMLInputElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordingIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -239,7 +245,10 @@ function ChatScreen({ session }: { session: any }) {
   useEffect(() => {
     const fetchProfile = async () => {
       const { data } = await supabase.from('profiles').select('*').eq('id', user.id).single();
-      if (data) setProfile(data);
+      if (data) {
+        setProfile(data);
+        setEditedBio(data.bio || '');
+      }
     };
     fetchProfile();
   }, [user.id]);
@@ -253,12 +262,12 @@ function ChatScreen({ session }: { session: any }) {
   }, [user.id]);
 
   useEffect(() => {
-    const fetchMessages = async () => {
-      if (!selectedUser) {
-        setMessages([]);
-        return;
-      }
+    if (!selectedUser) {
+      setMessages([]);
+      return;
+    }
 
+    const fetchMessages = async () => {
       const { data } = await supabase
         .from('messages')
         .select('*, profiles:profiles!sender_id(*)')
@@ -271,7 +280,7 @@ function ChatScreen({ session }: { session: any }) {
     fetchMessages();
 
     const channel = supabase
-      .channel('public:messages')
+      .channel(`chat:${selectedUser.id}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, async (payload) => {
         const newMsg = payload.new as Message;
         
@@ -282,10 +291,8 @@ function ChatScreen({ session }: { session: any }) {
         }));
 
         // Filter for current chat
-        if (selectedUser && (
-          (newMsg.sender_id === user.id && newMsg.receiver_id === selectedUser.id) || 
-          (newMsg.sender_id === selectedUser.id && newMsg.receiver_id === user.id)
-        )) {
+        if ((newMsg.sender_id === user.id && newMsg.receiver_id === selectedUser.id) || 
+            (newMsg.sender_id === selectedUser.id && newMsg.receiver_id === user.id)) {
           const { data: fullMsg } = await supabase
             .from('messages')
             .select('*, profiles:profiles!sender_id(*)')
@@ -312,6 +319,18 @@ function ChatScreen({ session }: { session: any }) {
       const reader = new FileReader();
       reader.onloadend = () => {
         setImagePreview(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleAvatarSelect = (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      setAvatarFile(file);
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setAvatarPreview(reader.result as string);
       };
       reader.readAsDataURL(file);
     }
@@ -392,6 +411,50 @@ function ChatScreen({ session }: { session: any }) {
   };
 
   const filteredUsers = users.filter(u => u.username.toLowerCase().includes(searchQuery.toLowerCase()));
+
+  const handleUpdateProfile = async () => {
+    setIsUpdatingProfile(true);
+    try {
+      let avatarUrl = profile?.avatar_url;
+
+      if (avatarFile) {
+        const fileExt = avatarFile.name.split('.').pop();
+        const fileName = `${crypto.randomUUID()}.${fileExt}`;
+        const filePath = `avatars/${user.id}/${fileName}`;
+        
+        const { error: uploadError } = await supabase.storage
+          .from('chat-images')
+          .upload(filePath, avatarFile);
+
+        if (uploadError) throw uploadError;
+
+        const { data: { publicUrl } } = supabase.storage
+          .from('chat-images')
+          .getPublicUrl(filePath);
+        
+        avatarUrl = publicUrl;
+      }
+
+      const { error } = await supabase
+        .from('profiles')
+        .update({ 
+          bio: editedBio,
+          avatar_url: avatarUrl
+        })
+        .eq('id', user.id);
+
+      if (error) throw error;
+      
+      setProfile(prev => prev ? { ...prev, bio: editedBio, avatar_url: avatarUrl || prev.avatar_url } : null);
+      setShowProfileModal(false);
+      setAvatarFile(null);
+      setAvatarPreview(null);
+    } catch (err: any) {
+      alert(err.message);
+    } finally {
+      setIsUpdatingProfile(false);
+    }
+  };
 
   return (
     <div className="flex h-screen bg-bg-main overflow-hidden font-sans relative">
@@ -491,9 +554,74 @@ function ChatScreen({ session }: { session: any }) {
               <p className="text-sm font-bold text-text-primary truncate">{profile?.username || 'User'}</p>
               <p className="text-[10px] text-text-secondary uppercase font-bold tracking-tighter">My Profile</p>
             </div>
+            <button 
+              onClick={() => setShowProfileModal(true)}
+              className="p-2 hover:bg-white hover:shadow-sm rounded-xl text-text-secondary transition-all"
+            >
+              <Settings className="w-4 h-4" />
+            </button>
           </div>
         </div>
       </aside>
+
+      {/* Profile Modal */}
+      {showProfileModal && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <div className="bg-white rounded-[2.5rem] shadow-2xl border border-border-theme w-full max-w-md overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="p-6 border-b border-border-theme flex items-center justify-between">
+              <h3 className="text-xl font-bold text-text-primary">Edit Profile</h3>
+              <button onClick={() => setShowProfileModal(false)} className="p-2 hover:bg-slate-100 rounded-xl transition-colors">
+                <X className="w-5 h-5 text-text-secondary" />
+              </button>
+            </div>
+            <div className="p-8 space-y-6">
+              <div className="text-center mb-6">
+                <div className="relative inline-block group cursor-pointer" onClick={() => avatarInputRef.current?.click()}>
+                  {avatarPreview || profile?.avatar_url ? (
+                    <img src={avatarPreview || profile?.avatar_url!} alt="Me" className="w-24 h-24 rounded-[2rem] object-cover mx-auto mb-4 shadow-lg border-4 border-white group-hover:opacity-75 transition-opacity" />
+                  ) : (
+                    <div className="w-24 h-24 rounded-[2rem] bg-slate-100 flex items-center justify-center text-slate-400 mx-auto mb-4 border border-border-theme group-hover:bg-slate-200 transition-colors">
+                      <UserIcon className="w-10 h-10" />
+                    </div>
+                  )}
+                  <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                    <div className="bg-black/40 p-2 rounded-full text-white">
+                      <ImageIcon className="w-5 h-5" />
+                    </div>
+                  </div>
+                  <input 
+                    type="file" 
+                    ref={avatarInputRef} 
+                    onChange={handleAvatarSelect} 
+                    accept="image/*" 
+                    className="hidden" 
+                  />
+                </div>
+                <p className="font-bold text-text-primary">{profile?.username}</p>
+                <p className="text-[10px] text-text-secondary uppercase font-bold tracking-widest mt-1">Click to change avatar</p>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-text-secondary uppercase tracking-widest mb-2 ml-1">Bio</label>
+                <textarea
+                  value={editedBio}
+                  onChange={(e) => setEditedBio(e.target.value)}
+                  placeholder="Tell us about yourself..."
+                  className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all resize-none h-32"
+                />
+              </div>
+
+              <button
+                onClick={handleUpdateProfile}
+                disabled={isUpdatingProfile}
+                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-2xl transition-all shadow-lg shadow-blue-100 flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {isUpdatingProfile ? <Loader2 className="w-5 h-5 animate-spin" /> : 'Save Changes'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Main Chat Area */}
       <main className="flex-1 flex flex-col min-w-0 bg-bg-main relative">
