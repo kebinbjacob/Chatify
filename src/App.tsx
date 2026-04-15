@@ -22,7 +22,9 @@ import {
   Square,
   Play,
   Pause,
-  Trash2
+  Trash2,
+  Smile,
+  Search
 } from 'lucide-react';
 import { format } from 'date-fns';
 
@@ -435,6 +437,9 @@ function ChatScreen({ session }: { session: any }) {
   const [isRecording, setIsRecording] = useState(false);
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
   const [recordingDuration, setRecordingDuration] = useState(0);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<Profile[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -459,7 +464,7 @@ function ChatScreen({ session }: { session: any }) {
       // Fetch last 50 messages for the current context
       let query = supabase
         .from('messages')
-        .select('*, profiles(*), reactions(*)')
+        .select('*, profiles:profiles!user_id(*), reactions(*)')
         .order('created_at', { ascending: false })
         .limit(50);
 
@@ -481,36 +486,48 @@ function ChatScreen({ session }: { session: any }) {
     fetchData();
 
     // Subscribe to messages
-    const channelName = selectedUser ? `chat:${selectedUser.id}` : 'no-chat';
-    if (!selectedUser) return;
+    if (!selectedUser) {
+      setMessages([]);
+      return;
+    }
 
     const messageChannel = supabase
-      .channel(channelName)
+      .channel(`room:${selectedUser.id}`)
       .on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'messages' },
         async (payload) => {
           const newMsg = payload.new as Message;
-          const isGlobalView = !selectedUser && !newMsg.receiver_id;
-          const isDMView = selectedUser && (
+          
+          // Check if message belongs to current DM conversation
+          const isDMView = (
             (newMsg.user_id === user.id && newMsg.receiver_id === selectedUser.id) ||
             (newMsg.user_id === selectedUser.id && newMsg.receiver_id === user.id)
           );
 
-          if (isGlobalView || isDMView) {
-            const { data: newMsgWithProfile } = await supabase
+          if (isDMView) {
+            // Fetch the full message with profile and reactions
+            const { data: newMsgWithProfile, error } = await supabase
               .from('messages')
-              .select('*, profiles(*), reactions(*)')
+              .select('*, profiles:profiles!user_id(*), reactions(*)')
               .eq('id', newMsg.id)
               .single();
 
-            if (newMsgWithProfile) {
-              setMessages((prev) => [...prev, newMsgWithProfile]);
+            if (newMsgWithProfile && !error) {
+              setMessages((prev) => {
+                // Prevent duplicates
+                if (prev.some(m => m.id === newMsgWithProfile.id)) return prev;
+                return [...prev, newMsgWithProfile];
+              });
             }
           }
         }
       )
-      .subscribe();
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          console.log('Subscribed to messages for', selectedUser.username);
+        }
+      });
 
     // Subscribe to reactions
     const reactionChannel = supabase
@@ -524,7 +541,7 @@ function ChatScreen({ session }: { session: any }) {
           // Refresh the specific message's reactions
           const { data: updatedMsg } = await supabase
             .from('messages')
-            .select('*, profiles(*), reactions(*)')
+            .select('*, profiles:profiles!user_id(*), reactions(*)')
             .eq('id', reaction.message_id)
             .single();
 
@@ -593,6 +610,7 @@ function ChatScreen({ session }: { session: any }) {
 
   const handleSendMessage = async (e: FormEvent) => {
     e.preventDefault();
+    if (!selectedUser) return;
     if (!newMessage.trim() && !selectedFile && !audioBlob) return;
 
     setUploading(true);
@@ -600,6 +618,7 @@ function ChatScreen({ session }: { session: any }) {
     let audioUrl = null;
 
     try {
+      // Upload image if selected
       if (selectedFile) {
         const fileExt = selectedFile.name.split('.').pop();
         const fileName = `${crypto.randomUUID()}.${fileExt}`;
@@ -618,6 +637,7 @@ function ChatScreen({ session }: { session: any }) {
         imageUrl = publicUrl;
       }
 
+      // Upload audio if recorded
       if (audioBlob) {
         const fileName = `${crypto.randomUUID()}.webm`;
         const filePath = `audio/${user.id}/${fileName}`;
@@ -635,15 +655,28 @@ function ChatScreen({ session }: { session: any }) {
         audioUrl = publicUrl;
       }
 
-      const { error } = await supabase.from('messages').insert({
-        user_id: user.id,
-        receiver_id: selectedUser?.id || null,
-        content: newMessage.trim() || null,
-        image_url: imageUrl,
-        audio_url: audioUrl
-      });
+      // Insert message
+      const { data: insertedMsg, error } = await supabase
+        .from('messages')
+        .insert({
+          user_id: user.id,
+          receiver_id: selectedUser.id,
+          content: newMessage.trim() || null,
+          image_url: imageUrl,
+          audio_url: audioUrl
+        })
+        .select('*, profiles:profiles!user_id(*), reactions(*)')
+        .single();
 
       if (error) throw error;
+
+      // Optimistically update UI if subscription is slow
+      if (insertedMsg) {
+        setMessages((prev) => {
+          if (prev.some(m => m.id === insertedMsg.id)) return prev;
+          return [...prev, insertedMsg];
+        });
+      }
 
       setNewMessage('');
       setSelectedFile(null);
@@ -733,6 +766,31 @@ function ChatScreen({ session }: { session: any }) {
     await supabase.auth.signOut();
   };
 
+  const handleSearch = async (query: string) => {
+    setSearchQuery(query);
+    if (query.trim().length < 2) {
+      setSearchResults([]);
+      return;
+    }
+
+    setIsSearching(true);
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .ilike('username', `%${query}%`)
+        .neq('id', user.id)
+        .limit(10);
+
+      if (error) throw error;
+      setSearchResults(data || []);
+    } catch (err) {
+      console.error('Search error:', err);
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
   const handleReaction = async (messageId: string, emoji: string) => {
     const existingReaction = messages
       .find(m => m.id === messageId)
@@ -765,35 +823,92 @@ function ChatScreen({ session }: { session: any }) {
           </h1>
         </div>
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          {/* Online Users List */}
+          {/* Search Bar */}
+          <div className="px-2">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-secondary" />
+              <input 
+                type="text"
+                value={searchQuery}
+                onChange={(e) => handleSearch(e.target.value)}
+                placeholder="Search users..."
+                className="w-full pl-10 pr-4 py-2 bg-bg-main border border-border-theme rounded-xl text-sm focus:ring-2 focus:ring-accent-theme outline-none transition-all"
+              />
+            </div>
+          </div>
+
+          {/* User List */}
           <div>
-            <h3 className="text-[10px] uppercase tracking-widest text-text-secondary font-bold mb-2 px-2">Direct Messages</h3>
+            <h3 className="text-[10px] uppercase tracking-widest text-text-secondary font-bold mb-2 px-2">
+              {searchQuery ? 'Search Results' : 'Direct Messages'}
+            </h3>
             <div className="space-y-1">
-              {onlineUsers.filter(u => u.user_id !== user.id).map((u, i) => (
-                <button 
-                  key={i} 
-                  onClick={() => setSelectedUser({ id: u.user_id, username: u.username, avatar_url: null, last_seen: null })}
-                  className={cn(
-                    "w-full flex items-center gap-3 p-3 rounded-lg transition-all text-left",
-                    selectedUser?.id === u.user_id ? "bg-accent-soft text-accent-theme shadow-sm" : "hover:bg-slate-50 text-text-primary"
-                  )}
-                >
-                  <div className="relative">
-                    <div className="w-8 h-8 rounded-full bg-slate-300 flex items-center justify-center text-white font-bold text-xs uppercase">
-                      {u.username?.[0] || '?'}
+              {searchQuery ? (
+                <>
+                  {isSearching ? (
+                    <div className="flex items-center justify-center py-4">
+                      <Loader2 className="w-5 h-5 animate-spin text-accent-theme" />
                     </div>
-                    <div className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-online border-2 border-white rounded-full"></div>
-                  </div>
-                  <div className="flex flex-col min-w-0">
-                    <span className="text-sm font-bold truncate">{u.username}</span>
-                    <span className="text-[10px] opacity-70">
-                      {u.is_typing ? "typing..." : "Online"}
-                    </span>
-                  </div>
-                </button>
-              ))}
-              {onlineUsers.filter(u => u.user_id !== user.id).length === 0 && (
-                <p className="text-xs text-text-secondary px-2 italic">No other users online</p>
+                  ) : searchResults.length > 0 ? (
+                    searchResults.map((u) => (
+                      <button 
+                        key={u.id} 
+                        onClick={() => {
+                          setSelectedUser(u);
+                          setSearchQuery('');
+                          setSearchResults([]);
+                        }}
+                        className={cn(
+                          "w-full flex items-center gap-3 p-3 rounded-lg transition-all text-left",
+                          selectedUser?.id === u.id ? "bg-accent-soft text-accent-theme shadow-sm" : "hover:bg-slate-50 text-text-primary"
+                        )}
+                      >
+                        <div className="w-8 h-8 rounded-full bg-slate-300 flex items-center justify-center text-white font-bold text-xs uppercase overflow-hidden">
+                          {u.avatar_url ? (
+                            <img src={u.avatar_url} alt={u.username} className="w-full h-full object-cover" />
+                          ) : (
+                            u.username?.[0] || '?'
+                          )}
+                        </div>
+                        <div className="flex flex-col min-w-0">
+                          <span className="text-sm font-bold truncate">{u.username}</span>
+                          <span className="text-[10px] opacity-70">Click to message</span>
+                        </div>
+                      </button>
+                    ))
+                  ) : (
+                    <p className="text-xs text-text-secondary px-2 italic py-2">No users found</p>
+                  )}
+                </>
+              ) : (
+                <>
+                  {onlineUsers.filter(u => u.user_id !== user.id).map((u, i) => (
+                    <button 
+                      key={i} 
+                      onClick={() => setSelectedUser({ id: u.user_id, username: u.username, avatar_url: null, last_seen: null })}
+                      className={cn(
+                        "w-full flex items-center gap-3 p-3 rounded-lg transition-all text-left",
+                        selectedUser?.id === u.user_id ? "bg-accent-soft text-accent-theme shadow-sm" : "hover:bg-slate-50 text-text-primary"
+                      )}
+                    >
+                      <div className="relative">
+                        <div className="w-8 h-8 rounded-full bg-slate-300 flex items-center justify-center text-white font-bold text-xs uppercase">
+                          {u.username?.[0] || '?'}
+                        </div>
+                        <div className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-online border-2 border-white rounded-full"></div>
+                      </div>
+                      <div className="flex flex-col min-w-0">
+                        <span className="text-sm font-bold truncate">{u.username}</span>
+                        <span className="text-[10px] opacity-70">
+                          {u.is_typing ? "typing..." : "Online"}
+                        </span>
+                      </div>
+                    </button>
+                  ))}
+                  {onlineUsers.filter(u => u.user_id !== user.id).length === 0 && (
+                    <p className="text-xs text-text-secondary px-2 italic py-2">No other users online</p>
+                  )}
+                </>
               )}
             </div>
           </div>
@@ -924,16 +1039,30 @@ function ChatScreen({ session }: { session: any }) {
                         )}
                         {msg.content}
 
+                    {/* Reaction Trigger Button (Mobile friendly) */}
+                    <button 
+                      className={cn(
+                        "absolute -top-3 p-1 rounded-full bg-white border border-border-theme shadow-sm opacity-0 group-hover/msg:opacity-100 transition-opacity z-10 hover:scale-110",
+                        isOwn ? "-left-3" : "-right-3"
+                      )}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        // Toggle logic could go here if we had a state for active reaction menu
+                      }}
+                    >
+                      <Smile className="w-3 h-3 text-text-secondary" />
+                    </button>
+
                     {/* Quick Reactions Tooltip */}
                     <div className={cn(
-                      "absolute -top-8 bg-white border border-border-theme shadow-lg rounded-full px-2 py-1 flex gap-1 opacity-0 group-hover/msg:opacity-100 transition-opacity z-20",
+                      "absolute -top-10 bg-white border border-border-theme shadow-xl rounded-full px-2 py-1.5 flex gap-1.5 opacity-0 group-hover/msg:opacity-100 transition-all z-20 scale-90 group-hover/msg:scale-100 origin-bottom",
                       isOwn ? "right-0" : "left-0"
                     )}>
                       {['❤️', '👍', '😂', '😮', '😢', '🔥'].map(emoji => (
                         <button 
                           key={emoji}
                           onClick={() => handleReaction(msg.id, emoji)}
-                          className="hover:scale-125 transition-transform p-1 grayscale hover:grayscale-0"
+                          className="hover:scale-125 transition-transform p-1 grayscale hover:grayscale-0 text-base"
                         >
                           {emoji}
                         </button>
@@ -943,7 +1072,7 @@ function ChatScreen({ session }: { session: any }) {
                     {/* Displayed Reactions */}
                     {msg.reactions && msg.reactions.length > 0 && (
                       <div className={cn(
-                        "absolute -bottom-4 flex flex-wrap gap-1",
+                        "absolute -bottom-5 flex flex-wrap gap-1 z-10",
                         isOwn ? "right-0 justify-end" : "left-0 justify-start"
                       )}>
                         {Object.entries(
@@ -958,14 +1087,14 @@ function ChatScreen({ session }: { session: any }) {
                               key={emoji}
                               onClick={() => handleReaction(msg.id, emoji)}
                               className={cn(
-                                "flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] border transition-all",
+                                "flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] border transition-all shadow-sm",
                                 hasReacted 
-                                  ? "bg-accent-soft border-accent-theme text-accent-theme" 
+                                  ? "bg-accent-soft border-accent-theme text-accent-theme font-bold" 
                                   : "bg-white border-border-theme text-text-secondary hover:border-slate-300"
                               )}
                             >
                               <span>{emoji}</span>
-                              <span className="font-bold">{count}</span>
+                              <span>{count}</span>
                             </button>
                           );
                         })}

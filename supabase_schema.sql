@@ -137,4 +137,5 @@ create trigger on_auth_user_created
   for each row execute procedure public.handle_new_user();
 
 -- 7. Enable Realtime for messages
+alter table public.messages replica identity full;
 alter publication supabase_realtime add table messages;
