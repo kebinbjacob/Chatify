@@ -1,5 +1,5 @@
--- 1. Create profiles table
-create table public.profiles (
+-- 1. Create profiles table (Keep existing)
+create table if not exists public.profiles (
   id uuid references auth.users on delete cascade primary key,
   username text unique not null,
   avatar_url text,
@@ -9,96 +9,53 @@ create table public.profiles (
   constraint username_length check (char_length(username) >= 3)
 );
 
--- 2. Create messages table
+-- 2. Create messages table (Simple structure)
+drop table if exists public.reactions cascade;
+drop table if exists public.messages cascade;
+drop table if exists public.participants cascade;
+drop table if exists public.conversations cascade;
+
 create table public.messages (
   id uuid primary key default gen_random_uuid(),
-  user_id uuid references public.profiles(id) on delete cascade not null,
-  receiver_id uuid references public.profiles(id) on delete cascade, -- Null for global chat
-  content text,
+  sender_id uuid references public.profiles(id) not null,
+  receiver_id uuid references public.profiles(id), -- null for global chat
+  content text not null,
   image_url text,
   audio_url text,
-  created_at timestamptz default now(),
-  
-  constraint content_or_media check (content is not null or image_url is not null or audio_url is not null)
+  created_at timestamptz default now()
 );
 
--- 3. Create reactions table
-create table public.reactions (
-  id uuid primary key default gen_random_uuid(),
-  message_id uuid references public.messages(id) on delete cascade not null,
-  user_id uuid references public.profiles(id) on delete cascade not null,
-  emoji text not null,
-  created_at timestamptz default now(),
-  
-  unique(message_id, user_id, emoji)
-);
-
--- 4. Enable Row Level Security (RLS)
+-- 3. Enable Row Level Security (RLS)
 alter table public.profiles enable row level security;
 alter table public.messages enable row level security;
-alter table public.reactions enable row level security;
 
--- 5. Create policies for profiles
-create policy "Public profiles are viewable by everyone."
-  on profiles for select
-  using ( true );
+-- 4. RLS Policies
+create policy "Public profiles are viewable by everyone." on profiles for select using ( true );
+create policy "Users can insert their own profile." on profiles for insert with check ( auth.uid() = id );
+create policy "Users can update own profile." on profiles for update using ( auth.uid() = id );
 
-create policy "Users can insert their own profile."
-  on profiles for insert
-  with check ( auth.uid() = id );
-
-create policy "Users can update own profile."
-  on profiles for update
-  using ( auth.uid() = id );
-
--- 6. Create policies for messages (Strictly DMs)
-create policy "Messages are viewable by participants."
+create policy "Users can view their own messages."
   on messages for select
-  using (
-    auth.uid() = user_id or 
-    auth.uid() = receiver_id
-  );
+  using ( auth.uid() = sender_id or auth.uid() = receiver_id or receiver_id is null );
 
-create policy "Authenticated users can insert their own messages."
+create policy "Users can insert messages."
   on messages for insert
-  with check ( auth.uid() = user_id );
+  with check ( auth.uid() = sender_id );
 
--- 7. Create policies for reactions
-create policy "Reactions are viewable by everyone."
-  on reactions for select
-  using ( true );
-
-create policy "Authenticated users can add reactions."
-  on reactions for insert
-  with check ( auth.uid() = user_id );
-
-create policy "Users can remove their own reactions."
-  on reactions for delete
-  using ( auth.uid() = user_id );
-
--- 8. Storage Setup
+-- 5. Storage Setup
 insert into storage.buckets (id, name, public) 
 values ('chat-images', 'chat-images', true)
 on conflict (id) do nothing;
 
-create policy "Public Access to Chat Images"
-  on storage.objects for select
-  using ( bucket_id = 'chat-images' );
+create policy "Public Access to Chat Images" on storage.objects for select using ( bucket_id = 'chat-images' );
+create policy "Authenticated users can upload images" on storage.objects for insert with check ( bucket_id = 'chat-images' and auth.role() = 'authenticated' );
 
-create policy "Authenticated users can upload images"
-  on storage.objects for insert
-  with check ( bucket_id = 'chat-images' and auth.role() = 'authenticated' );
-
--- 9. Realtime Setup
+-- 6. Realtime Setup
 alter table public.messages replica identity full;
-alter table public.reactions replica identity full;
-
--- Add tables to the realtime publication
--- Note: If you get an error that they already exist, you can ignore it or drop/recreate the publication
 drop publication if exists supabase_realtime;
-create publication supabase_realtime for table messages, reactions, profiles;
+create publication supabase_realtime for table messages, profiles;
 
--- 10. Auth Trigger for Profiles
+-- 7. Auth Trigger for Profiles
 create or replace function public.handle_new_user()
 returns trigger as $$
 begin
@@ -108,7 +65,6 @@ begin
 end;
 $$ language plpgsql security definer;
 
--- Trigger the function every time a user is created
 drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created
   after insert on auth.users

@@ -1,6 +1,6 @@
 {
   "name": "Chatify",
   "description": "A real-time chat application with authentication, presence, direct messaging, and image uploads using Supabase.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": ["microphone"],
   "majorCapabilities": []
 }

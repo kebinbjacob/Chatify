@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect, useRef, FormEvent, ChangeEvent } from 'react';
+import { useState, useEffect, useRef, FormEvent, ChangeEvent, KeyboardEvent } from 'react';
 import { supabase, isSupabaseConfigured } from './lib/supabase';
 import { cn } from './lib/utils';
 import { 
@@ -11,7 +11,6 @@ import {
   LogOut, 
   User as UserIcon, 
   MessageSquare, 
-  Circle, 
   Loader2,
   AlertCircle,
   Settings,
@@ -22,12 +21,11 @@ import {
   Square,
   Play,
   Pause,
-  Trash2,
-  Smile,
   Search,
-  Menu
+  Menu,
+  MoreVertical
 } from 'lucide-react';
-import { format } from 'date-fns';
+import { format, isToday, isYesterday } from 'date-fns';
 
 // --- Types ---
 
@@ -39,32 +37,15 @@ interface Profile {
   bio?: string | null;
 }
 
-interface Reaction {
-  id: string;
-  message_id: string;
-  user_id: string;
-  emoji: string;
-}
-
 interface Message {
   id: string;
-  user_id: string;
+  sender_id: string;
   receiver_id: string | null;
-  content: string | null;
+  content: string;
   image_url: string | null;
   audio_url: string | null;
   created_at: string;
   profiles?: Profile;
-  reactions?: Reaction[];
-}
-
-interface PresenceState {
-  [key: string]: {
-    user_id: string;
-    username: string;
-    online_at: string;
-    is_typing?: boolean;
-  }[];
 }
 
 // --- Components ---
@@ -80,13 +61,11 @@ export default function App() {
       return;
     }
 
-    // Check active session
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
       setLoading(false);
     });
 
-    // Listen for auth changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
     });
@@ -94,26 +73,20 @@ export default function App() {
     return () => subscription.unsubscribe();
   }, []);
 
-  if (!isSupabaseConfigured) {
-    return <ConfigRequiredScreen />;
-  }
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center min-h-screen bg-bg-main">
-        <Loader2 className="w-8 h-8 animate-spin text-accent-theme" />
-      </div>
-    );
-  }
-
-  if (!session) {
-    return <AuthScreen setError={setError} error={error} />;
-  }
+  if (!isSupabaseConfigured) return <ConfigRequiredScreen />;
+  if (loading) return <LoadingScreen />;
+  if (!session) return <AuthScreen setError={setError} error={error} />;
 
   return <ChatScreen session={session} />;
 }
 
-// --- Config Required Screen ---
+function LoadingScreen() {
+  return (
+    <div className="flex items-center justify-center min-h-screen bg-bg-main">
+      <Loader2 className="w-8 h-8 animate-spin text-accent-theme" />
+    </div>
+  );
+}
 
 function ConfigRequiredScreen() {
   return (
@@ -122,174 +95,20 @@ function ConfigRequiredScreen() {
         <div className="bg-amber-50 w-20 h-20 rounded-2xl flex items-center justify-center mx-auto mb-8 border border-amber-100">
           <Settings className="w-10 h-10 text-amber-500 animate-[spin_8s_linear_infinite]" />
         </div>
-        
         <h1 className="text-2xl font-bold text-text-primary mb-4">Supabase Configuration Required</h1>
         <p className="text-text-secondary mb-8 leading-relaxed">
-          To enable real-time chat, you need to connect your Supabase project. Please add the following keys to your project <strong>Secrets</strong>:
+          Please add <strong>VITE_SUPABASE_URL</strong> and <strong>VITE_SUPABASE_ANON_KEY</strong> to your project Secrets.
         </p>
-        
-        <div className="space-y-3 text-left mb-8">
-          <div className="p-4 bg-slate-50 rounded-xl border border-slate-200">
-            <code className="text-xs font-bold text-blue-600 block mb-1">VITE_SUPABASE_URL</code>
-            <p className="text-xs text-slate-500">Your Supabase project URL (e.g., https://xyz.supabase.co)</p>
-          </div>
-          <div className="p-4 bg-slate-50 rounded-xl border border-slate-200">
-            <code className="text-xs font-bold text-blue-600 block mb-1">VITE_SUPABASE_ANON_KEY</code>
-            <p className="text-xs text-slate-500">Your Supabase project anonymous public key</p>
-          </div>
-        </div>
-        
-        <div className="p-4 bg-blue-50 rounded-xl border border-blue-100 text-blue-700 text-sm flex gap-3 items-start text-left">
-          <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
-          <p>After adding the secrets, the application will automatically refresh and connect to your database.</p>
-        </div>
       </div>
     </div>
   );
 }
 
-// --- Profile Settings Component ---
-
-function ProfileSettings({ profile, onClose, onUpdate, userId }: { profile: Profile | null, onClose: () => void, onUpdate: (p: Profile) => void, userId: string }) {
-  const [username, setUsername] = useState(profile?.username || '');
-  const [bio, setBio] = useState(profile?.bio || '');
-  const [loading, setLoading] = useState(false);
-  const [avatarUrl, setAvatarUrl] = useState(profile?.avatar_url || '');
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const handleAvatarUpload = async (e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    setLoading(true);
-    try {
-      const fileExt = file.name.split('.').pop();
-      const fileName = `${userId}-${Math.random()}.${fileExt}`;
-      const filePath = `avatars/${fileName}`;
-
-      const { error: uploadError } = await supabase.storage
-        .from('chat-images')
-        .upload(filePath, file);
-
-      if (uploadError) throw uploadError;
-
-      const { data: { publicUrl } } = supabase.storage
-        .from('chat-images')
-        .getPublicUrl(filePath);
-
-      setAvatarUrl(publicUrl);
-    } catch (err: any) {
-      alert('Error uploading avatar: ' + err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleSave = async (e: FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-
-    try {
-      const { data, error } = await supabase
-        .from('profiles')
-        .update({
-          username,
-          bio,
-          avatar_url: avatarUrl,
-          last_seen: new Date().toISOString()
-        })
-        .eq('id', userId)
-        .select()
-        .single();
-
-      if (error) throw error;
-      onUpdate(data);
-      onClose();
-    } catch (err: any) {
-      alert('Error updating profile: ' + err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden border border-border-theme">
-        <div className="p-6 border-b border-border-theme flex items-center justify-between">
-          <h2 className="text-xl font-bold text-text-primary">Profile Settings</h2>
-          <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
-            <X className="w-5 h-5 text-text-secondary" />
-          </button>
-        </div>
-        
-        <form onSubmit={handleSave} className="p-6 space-y-6">
-          <div className="flex flex-col items-center gap-4">
-            <div className="relative group cursor-pointer" onClick={() => fileInputRef.current?.click()}>
-              {avatarUrl ? (
-                <img src={avatarUrl} alt="Avatar" className="w-24 h-24 rounded-full object-cover border-2 border-accent-theme shadow-md" />
-              ) : (
-                <div className="w-24 h-24 rounded-full bg-slate-100 flex items-center justify-center text-slate-400 border-2 border-dashed border-slate-300">
-                  <UserIcon className="w-12 h-12" />
-                </div>
-              )}
-              <div className="absolute inset-0 bg-black/20 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-                <ImageIcon className="w-6 h-6 text-white" />
-              </div>
-              <input type="file" ref={fileInputRef} onChange={handleAvatarUpload} accept="image/*" className="hidden" />
-            </div>
-            <p className="text-xs text-text-secondary">Click to change avatar</p>
-          </div>
-
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-bold text-text-primary mb-1">Username</label>
-              <input
-                type="text"
-                required
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                className="w-full px-4 py-2 bg-bg-main border border-border-theme rounded-xl focus:ring-2 focus:ring-accent-theme outline-none transition-all"
-                placeholder="Your username"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-bold text-text-primary mb-1">Bio</label>
-              <textarea
-                value={bio}
-                onChange={(e) => setBio(e.target.value)}
-                className="w-full px-4 py-2 bg-bg-main border border-border-theme rounded-xl focus:ring-2 focus:ring-accent-theme outline-none transition-all h-24 resize-none"
-                placeholder="Tell us about yourself..."
-              />
-            </div>
-          </div>
-
-          <div className="flex gap-3">
-            <button
-              type="button"
-              onClick={onClose}
-              className="flex-1 px-4 py-3 rounded-xl font-bold text-sm border border-border-theme hover:bg-slate-50 transition-colors"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={loading}
-              className="flex-1 bg-accent-theme hover:bg-blue-600 disabled:opacity-50 text-white px-4 py-3 rounded-xl font-bold text-sm transition-all shadow-sm flex items-center justify-center gap-2"
-            >
-              {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Save Changes'}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
-
-function AuthScreen({ setError, error }: { setError: (err: string | null) => void, error: string | null }) {
-  const [isLogin, setIsLogin] = useState(true);
+function AuthScreen({ setError, error }: { setError: (e: string | null) => void, error: string | null }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [username, setUsername] = useState('');
+  const [isLogin, setIsLogin] = useState(true);
   const [loading, setLoading] = useState(false);
 
   const handleAuth = async (e: FormEvent) => {
@@ -302,32 +121,13 @@ function AuthScreen({ setError, error }: { setError: (err: string | null) => voi
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
       } else {
-        const { data, error } = await supabase.auth.signUp({ 
+        const { error } = await supabase.auth.signUp({ 
           email, 
           password,
-          options: {
-            data: { username }
-          }
+          options: { data: { username } }
         });
         if (error) throw error;
-        
-        // If signup successful, we might need to manually create the profile 
-        // if the trigger isn't set up, but we'll assume the trigger handles it.
-        if (data.user) {
-          // Check if profile exists, if not create it (fallback)
-          const { data: profile } = await supabase
-            .from('profiles')
-            .select('id')
-            .eq('id', data.user.id)
-            .single();
-            
-          if (!profile) {
-            await supabase.from('profiles').insert({
-              id: data.user.id,
-              username: username || email.split('@')[0]
-            });
-          }
-        }
+        alert('Check your email for the confirmation link!');
       }
     } catch (err: any) {
       setError(err.message);
@@ -337,273 +137,173 @@ function AuthScreen({ setError, error }: { setError: (err: string | null) => voi
   };
 
   return (
-    <div className="flex flex-col items-center justify-center min-h-screen bg-slate-50 p-4">
-      <div className="w-full max-w-md bg-white rounded-2xl shadow-xl p-8 border border-slate-200">
-        <div className="flex items-center justify-center mb-8">
-          <div className="bg-blue-600 p-3 rounded-xl shadow-lg shadow-blue-200">
-            <MessageSquare className="w-8 h-8 text-white" />
+    <div className="min-h-screen bg-bg-main flex flex-col items-center justify-center p-4">
+      <div className="bg-white p-8 rounded-[2.5rem] shadow-2xl border border-border-theme w-full max-w-md">
+        <div className="text-center mb-8">
+          <div className="bg-blue-50 w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4">
+            <MessageSquare className="w-8 h-8 text-blue-600" />
           </div>
+          <h1 className="text-3xl font-bold text-text-primary tracking-tight">Chatify</h1>
+          <p className="text-text-secondary mt-2">{isLogin ? 'Welcome back!' : 'Create your account'}</p>
         </div>
-        
-        <h1 className="text-2xl font-bold text-center text-slate-900 mb-2">
-          {isLogin ? 'Welcome Back' : 'Create Account'}
-        </h1>
-        <p className="text-slate-500 text-center mb-8">
-          {isLogin ? 'Sign in to join the conversation' : 'Join our global chat community'}
-        </p>
 
         {error && (
-          <div className="bg-red-50 border border-red-200 text-red-600 px-4 py-3 rounded-lg flex items-start gap-3 mb-6">
-            <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
-            <p className="text-sm">{error}</p>
+          <div className="mb-6 p-4 bg-red-50 border border-red-100 text-red-600 rounded-2xl text-sm flex items-center gap-3">
+            <AlertCircle className="w-5 h-5 shrink-0" />
+            <p>{error}</p>
           </div>
         )}
 
         <form onSubmit={handleAuth} className="space-y-4">
           {!isLogin && (
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">Username</label>
+              <label className="block text-sm font-medium text-slate-700 mb-1 ml-1">Username</label>
               <input
                 type="text"
                 required
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
+                className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none transition-all"
                 placeholder="johndoe"
               />
             </div>
           )}
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-1">Email</label>
+            <label className="block text-sm font-medium text-slate-700 mb-1 ml-1">Email</label>
             <input
               type="email"
               required
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
+              className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none transition-all"
               placeholder="you@example.com"
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-1">Password</label>
+            <label className="block text-sm font-medium text-slate-700 mb-1 ml-1">Password</label>
             <input
               type="password"
               required
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
+              className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none transition-all"
               placeholder="••••••••"
             />
           </div>
           <button
             type="submit"
             disabled={loading}
-            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 rounded-lg transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-2xl transition-all shadow-lg shadow-blue-100 flex items-center justify-center gap-2 disabled:opacity-50 mt-4"
           >
             {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : (isLogin ? 'Sign In' : 'Sign Up')}
           </button>
         </form>
 
-        <div className="mt-6 text-center">
+        <div className="mt-8 text-center">
           <button
             onClick={() => setIsLogin(!isLogin)}
-            className="text-blue-600 hover:underline text-sm font-medium"
+            className="text-blue-600 hover:underline text-sm font-bold"
           >
             {isLogin ? "Don't have an account? Sign up" : "Already have an account? Sign in"}
           </button>
         </div>
       </div>
-      
-      <div className="mt-8 text-slate-400 text-xs max-w-sm text-center">
-        Make sure you have configured your Supabase environment variables and applied the SQL schema provided in <code>supabase_schema.sql</code>.
-      </div>
     </div>
   );
 }
 
-// --- Chat Screen ---
-
 function ChatScreen({ session }: { session: any }) {
+  const [users, setUsers] = useState<Profile[]>([]);
+  const [selectedUser, setSelectedUser] = useState<Profile | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [lastMessages, setLastMessages] = useState<Record<string, Message>>({});
   const [newMessage, setNewMessage] = useState('');
   const [profile, setProfile] = useState<Profile | null>(null);
-  const [onlineUsers, setOnlineUsers] = useState<any[]>([]);
-  const [typingUsers, setTypingUsers] = useState<string[]>([]);
-  const [isTyping, setIsTyping] = useState(false);
-  const [selectedUser, setSelectedUser] = useState<Profile | null>(null); // null means Global Chat
   const [uploading, setUploading] = useState(false);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [showProfileSettings, setShowProfileSettings] = useState(false);
+  const [showSidebar, setShowSidebar] = useState(true);
   const [isRecording, setIsRecording] = useState(false);
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
   const [recordingDuration, setRecordingDuration] = useState(0);
   const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState<Profile[]>([]);
-  const [isSearching, setIsSearching] = useState(false);
-  const [showSidebar, setShowSidebar] = useState(true);
+  const [showUserInfo, setShowUserInfo] = useState(false);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordingIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   const user = session.user;
 
-  // Presence and Typing
   useEffect(() => {
-    if (!profile) return;
-
-    const presenceChannel = supabase.channel('online-users', {
-      config: {
-        presence: {
-          key: user.id,
-        },
-      },
-    });
-
-    presenceChannel
-      .on('presence', { event: 'sync' }, () => {
-        const state = presenceChannel.presenceState();
-        const users = Object.values(state).flat();
-        setOnlineUsers(users);
-        
-        const typing = Object.values(state)
-          .flat()
-          .filter((u: any) => u.is_typing && u.user_id !== user.id)
-          .map((u: any) => u.username);
-        setTypingUsers(typing);
-      })
-      .subscribe(async (status) => {
-        if (status === 'SUBSCRIBED') {
-          await presenceChannel.track({
-            user_id: user.id,
-            username: profile.username,
-            online_at: new Date().toISOString(),
-            is_typing: false
-          });
-        }
-      });
-
-    return () => {
-      presenceChannel.unsubscribe();
+    const fetchProfile = async () => {
+      const { data } = await supabase.from('profiles').select('*').eq('id', user.id).single();
+      if (data) setProfile(data);
     };
-  }, [user.id, profile]);
+    fetchProfile();
+  }, [user.id]);
 
-  // Message and Reaction Subscriptions
   useEffect(() => {
-    const messageChannel = supabase
-      .channel('global-message-changes')
-      .on(
-        'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'messages' },
-        async (payload) => {
-          const newMsg = payload.new as Message;
-          
-          // We only care if the message is for us or from us
-          const involvesMe = newMsg.user_id === user.id || newMsg.receiver_id === user.id;
-          if (!involvesMe) return;
-
-          // If we are currently looking at this conversation, add it to the list
-          const isInCurrentConversation = selectedUser && (
-            (newMsg.user_id === user.id && newMsg.receiver_id === selectedUser.id) ||
-            (newMsg.user_id === selectedUser.id && newMsg.receiver_id === user.id)
-          );
-
-          if (isInCurrentConversation) {
-            const { data: newMsgWithProfile, error } = await supabase
-              .from('messages')
-              .select('*, profiles:profiles!user_id(*), reactions(*)')
-              .eq('id', newMsg.id)
-              .single();
-
-            if (newMsgWithProfile && !error) {
-              setMessages((prev) => {
-                if (prev.some(m => m.id === newMsgWithProfile.id)) return prev;
-                return [...prev, newMsgWithProfile];
-              });
-            }
-          }
-        }
-      )
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'reactions' },
-        async (payload) => {
-          const reaction = (payload.new || payload.old) as Reaction;
-          
-          // Refresh the specific message's reactions if it's in our current view
-          setMessages((prev) => {
-            const msgToUpdate = prev.find(m => m.id === reaction.message_id);
-            if (msgToUpdate) {
-              // Fetch updated message data
-              supabase
-                .from('messages')
-                .select('*, profiles:profiles!user_id(*), reactions(*)')
-                .eq('id', reaction.message_id)
-                .single()
-                .then(({ data }) => {
-                  if (data) {
-                    setMessages(current => current.map(m => m.id === data.id ? data : m));
-                  }
-                });
-            }
-            return prev;
-          });
-        }
-      )
-      .subscribe();
-
-    return () => {
-      messageChannel.unsubscribe();
+    const fetchUsers = async () => {
+      const { data } = await supabase.from('profiles').select('*').neq('id', user.id).order('username');
+      if (data) setUsers(data);
     };
-  }, [user.id, selectedUser]);
+    fetchUsers();
+  }, [user.id]);
 
-  // Fetch initial messages when selectedUser changes
   useEffect(() => {
     const fetchMessages = async () => {
       if (!selectedUser) {
         setMessages([]);
-        setShowSidebar(true);
         return;
       }
 
-      setShowSidebar(false);
-      const { data, error } = await supabase
+      const { data } = await supabase
         .from('messages')
-        .select('*, profiles:profiles!user_id(*), reactions(*)')
-        .or(`and(user_id.eq.${user.id},receiver_id.eq.${selectedUser.id}),and(user_id.eq.${selectedUser.id},receiver_id.eq.${user.id})`)
-        .order('created_at', { ascending: false })
-        .limit(50);
-
-      if (!error && data) {
-        setMessages(data.reverse());
-      }
+        .select('*, profiles:profiles!sender_id(*)')
+        .or(`and(sender_id.eq.${user.id},receiver_id.eq.${selectedUser.id}),and(sender_id.eq.${selectedUser.id},receiver_id.eq.${user.id})`)
+        .order('created_at', { ascending: true });
+      
+      if (data) setMessages(data);
     };
 
     fetchMessages();
-  }, [user.id, selectedUser]);
 
-  // Fetch initial profile
-  useEffect(() => {
-    const fetchProfile = async () => {
-      const { data } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', user.id)
-        .single();
-      
-      if (data) setProfile(data);
+    const channel = supabase
+      .channel('public:messages')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, async (payload) => {
+        const newMsg = payload.new as Message;
+        
+        // Update last messages for sidebar
+        setLastMessages(prev => ({
+          ...prev,
+          [newMsg.sender_id === user.id ? (newMsg.receiver_id || 'global') : newMsg.sender_id]: newMsg
+        }));
+
+        // Filter for current chat
+        if (selectedUser && (
+          (newMsg.sender_id === user.id && newMsg.receiver_id === selectedUser.id) || 
+          (newMsg.sender_id === selectedUser.id && newMsg.receiver_id === user.id)
+        )) {
+          const { data: fullMsg } = await supabase
+            .from('messages')
+            .select('*, profiles:profiles!sender_id(*)')
+            .eq('id', newMsg.id)
+            .single();
+          if (fullMsg) setMessages(prev => [...prev, fullMsg]);
+        }
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
     };
+  }, [selectedUser, user.id]);
 
-    fetchProfile();
-  }, [user.id]);
-
-  // Auto-scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, typingUsers]);
+  }, [messages]);
 
   const handleImageSelect = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -619,7 +319,6 @@ function ChatScreen({ session }: { session: any }) {
 
   const handleSendMessage = async (e: FormEvent) => {
     e.preventDefault();
-    if (!selectedUser) return;
     if (!newMessage.trim() && !selectedFile && !audioBlob) return;
 
     setUploading(true);
@@ -627,75 +326,40 @@ function ChatScreen({ session }: { session: any }) {
     let audioUrl = null;
 
     try {
-      // Upload image if selected
       if (selectedFile) {
         const fileExt = selectedFile.name.split('.').pop();
         const fileName = `${crypto.randomUUID()}.${fileExt}`;
         const filePath = `${user.id}/${fileName}`;
-
-        const { error: uploadError } = await supabase.storage
-          .from('chat-images')
-          .upload(filePath, selectedFile);
-
-        if (uploadError) throw uploadError;
-
-        const { data: { publicUrl } } = supabase.storage
-          .from('chat-images')
-          .getPublicUrl(filePath);
-        
+        await supabase.storage.from('chat-images').upload(filePath, selectedFile);
+        const { data: { publicUrl } } = supabase.storage.from('chat-images').getPublicUrl(filePath);
         imageUrl = publicUrl;
       }
 
-      // Upload audio if recorded
       if (audioBlob) {
         const fileName = `${crypto.randomUUID()}.webm`;
         const filePath = `audio/${user.id}/${fileName}`;
-
-        const { error: uploadError } = await supabase.storage
-          .from('chat-images')
-          .upload(filePath, audioBlob);
-
-        if (uploadError) throw uploadError;
-
-        const { data: { publicUrl } } = supabase.storage
-          .from('chat-images')
-          .getPublicUrl(filePath);
-        
+        await supabase.storage.from('chat-images').upload(filePath, audioBlob);
+        const { data: { publicUrl } } = supabase.storage.from('chat-images').getPublicUrl(filePath);
         audioUrl = publicUrl;
       }
 
-      // Insert message
-      const { data: insertedMsg, error } = await supabase
-        .from('messages')
-        .insert({
-          user_id: user.id,
-          receiver_id: selectedUser.id,
-          content: newMessage.trim() || null,
-          image_url: imageUrl,
-          audio_url: audioUrl
-        })
-        .select('*, profiles:profiles!user_id(*), reactions(*)')
-        .single();
+      const { error } = await supabase.from('messages').insert({
+        sender_id: user.id,
+        receiver_id: selectedUser?.id || null,
+        content: newMessage.trim(),
+        image_url: imageUrl,
+        audio_url: audioUrl
+      });
 
       if (error) throw error;
-
-      // Optimistically update UI if subscription is slow
-      if (insertedMsg) {
-        setMessages((prev) => {
-          if (prev.some(m => m.id === insertedMsg.id)) return prev;
-          return [...prev, insertedMsg];
-        });
-      }
 
       setNewMessage('');
       setSelectedFile(null);
       setImagePreview(null);
       setAudioBlob(null);
       setRecordingDuration(0);
-      stopTyping();
     } catch (err: any) {
-      console.error('Error sending message:', err);
-      alert('Failed to send message: ' + err.message);
+      alert(err.message);
     } finally {
       setUploading(false);
     }
@@ -706,7 +370,6 @@ function ChatScreen({ session }: { session: any }) {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
-      
       const chunks: Blob[] = [];
       mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
       mediaRecorder.onstop = () => {
@@ -714,557 +377,350 @@ function ChatScreen({ session }: { session: any }) {
         setAudioBlob(blob);
         stream.getTracks().forEach(track => track.stop());
       };
-
       mediaRecorder.start();
       setIsRecording(true);
-      setRecordingDuration(0);
-      
-      recordingIntervalRef.current = setInterval(() => {
-        setRecordingDuration(prev => prev + 1);
-      }, 1000);
+      recordingIntervalRef.current = setInterval(() => setRecordingDuration(d => d + 1), 1000);
     } catch (err) {
-      console.error('Error accessing microphone:', err);
-      alert('Could not access microphone. Please check permissions.');
+      alert('Microphone access denied');
     }
   };
 
   const stopRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
-      setIsRecording(false);
-      if (recordingIntervalRef.current) clearInterval(recordingIntervalRef.current);
-    }
+    mediaRecorderRef.current?.stop();
+    setIsRecording(false);
+    if (recordingIntervalRef.current) clearInterval(recordingIntervalRef.current);
   };
 
-  const formatDuration = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-  };
-
-  const handleTyping = () => {
-    if (!isTyping) {
-      setIsTyping(true);
-      updatePresence(true);
-    }
-
-    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-    
-    typingTimeoutRef.current = setTimeout(() => {
-      stopTyping();
-    }, 3000);
-  };
-
-  const stopTyping = () => {
-    setIsTyping(false);
-    updatePresence(false);
-    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-  };
-
-  const updatePresence = async (typing: boolean) => {
-    const channel = supabase.channel('online-users');
-    await channel.track({
-      user_id: user.id,
-      username: profile?.username || user.email?.split('@')[0],
-      online_at: new Date().toISOString(),
-      is_typing: typing
-    });
-  };
-
-  const handleSignOut = async () => {
-    await supabase.auth.signOut();
-  };
-
-  const handleSearch = async (query: string) => {
-    setSearchQuery(query);
-    if (query.trim().length < 2) {
-      setSearchResults([]);
-      return;
-    }
-
-    setIsSearching(true);
-    try {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('*')
-        .ilike('username', `%${query}%`)
-        .neq('id', user.id)
-        .limit(10);
-
-      if (error) throw error;
-      setSearchResults(data || []);
-    } catch (err) {
-      console.error('Search error:', err);
-    } finally {
-      setIsSearching(false);
-    }
-  };
-
-  const handleReaction = async (messageId: string, emoji: string) => {
-    const existingReaction = messages
-      .find(m => m.id === messageId)
-      ?.reactions?.find(r => r.user_id === user.id && r.emoji === emoji);
-
-    if (existingReaction) {
-      await supabase
-        .from('reactions')
-        .delete()
-        .eq('id', existingReaction.id);
-    } else {
-      await supabase
-        .from('reactions')
-        .insert({
-          message_id: messageId,
-          user_id: user.id,
-          emoji: emoji
-        });
-    }
-  };
+  const filteredUsers = users.filter(u => u.username.toLowerCase().includes(searchQuery.toLowerCase()));
 
   return (
     <div className="flex h-screen bg-bg-main overflow-hidden font-sans relative">
-      {/* Sidebar - Online Users */}
+      {/* Mobile Backdrop */}
+      {showSidebar && (
+        <div className="fixed inset-0 bg-black/20 backdrop-blur-sm z-40 md:hidden" onClick={() => setShowSidebar(false)} />
+      )}
+
+      {/* Sidebar */}
       <aside className={cn(
-        "absolute inset-y-0 left-0 z-50 w-[280px] flex flex-col bg-sidebar-bg border-r border-border-theme transition-transform duration-300 ease-in-out md:relative md:translate-x-0",
+        "absolute inset-y-0 left-0 z-50 w-80 flex flex-col bg-white border-r border-border-theme transition-transform duration-300 md:relative md:translate-x-0",
         showSidebar ? "translate-x-0" : "-translate-x-full"
       )}>
-        <div className="p-6 border-b border-border-theme flex items-center justify-between">
-          <h1 className="text-xl font-bold tracking-tight text-accent-theme flex items-center gap-2">
-            <MessageSquare className="w-6 h-6" />
-            Chatify
-          </h1>
-          <button 
-            className="md:hidden p-2 text-text-secondary hover:bg-slate-100 rounded-lg"
-            onClick={() => setShowSidebar(false)}
-          >
-            <X className="w-5 h-5" />
+        <div className="p-6 border-b border-border-theme flex items-center justify-between bg-white sticky top-0 z-10">
+          <div className="flex items-center gap-3">
+            <div className="bg-blue-600 p-2 rounded-xl shadow-lg shadow-blue-100">
+              <MessageSquare className="w-6 h-6 text-white" />
+            </div>
+            <h1 className="text-xl font-bold text-text-primary tracking-tight">Chatify</h1>
+          </div>
+          <button onClick={() => supabase.auth.signOut()} className="p-2 hover:bg-red-50 text-red-500 rounded-xl transition-colors">
+            <LogOut className="w-5 h-5" />
           </button>
         </div>
-        <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          {/* Search Bar */}
-          <div className="px-2">
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-secondary" />
-              <input 
-                type="text"
-                value={searchQuery}
-                onChange={(e) => handleSearch(e.target.value)}
-                placeholder="Search users..."
-                className="w-full pl-10 pr-4 py-2 bg-bg-main border border-border-theme rounded-xl text-sm focus:ring-2 focus:ring-accent-theme outline-none transition-all"
-              />
-            </div>
+
+        <div className="p-4">
+          <div className="relative group">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-secondary group-focus-within:text-blue-600 transition-colors" />
+            <input 
+              type="text" 
+              placeholder="Search users..." 
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+            />
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-2 pb-4 space-y-1 custom-scrollbar">
+          <div className="pt-4 pb-2 px-4">
+            <h2 className="text-[10px] font-bold text-text-secondary uppercase tracking-widest">Direct Messages</h2>
           </div>
 
-          {/* User List */}
-          <div>
-            <h3 className="text-[10px] uppercase tracking-widest text-text-secondary font-bold mb-2 px-2">
-              {searchQuery ? 'Search Results' : 'Direct Messages'}
-            </h3>
-            <div className="space-y-1">
-              {searchQuery ? (
-                <>
-                  {isSearching ? (
-                    <div className="flex items-center justify-center py-4">
-                      <Loader2 className="w-5 h-5 animate-spin text-accent-theme" />
-                    </div>
-                  ) : searchResults.length > 0 ? (
-                    searchResults.map((u) => (
-                      <button 
-                        key={u.id} 
-                        onClick={() => {
-                          setSelectedUser(u);
-                          setSearchQuery('');
-                          setSearchResults([]);
-                        }}
-                        className={cn(
-                          "w-full flex items-center gap-3 p-3 rounded-lg transition-all text-left",
-                          selectedUser?.id === u.id ? "bg-accent-soft text-accent-theme shadow-sm" : "hover:bg-slate-50 text-text-primary"
-                        )}
-                      >
-                        <div className="w-8 h-8 rounded-full bg-slate-300 flex items-center justify-center text-white font-bold text-xs uppercase overflow-hidden">
-                          {u.avatar_url ? (
-                            <img src={u.avatar_url} alt={u.username} className="w-full h-full object-cover" />
-                          ) : (
-                            u.username?.[0] || '?'
-                          )}
-                        </div>
-                        <div className="flex flex-col min-w-0">
-                          <span className="text-sm font-bold truncate">{u.username}</span>
-                          <span className="text-[10px] opacity-70">Click to message</span>
-                        </div>
-                      </button>
-                    ))
+          {filteredUsers.map(u => {
+            const lastMsg = lastMessages[u.id];
+            return (
+              <button 
+                key={u.id}
+                onClick={() => { setSelectedUser(u); setShowSidebar(false); }}
+                className={cn(
+                  "w-full flex items-center gap-3 p-4 rounded-2xl transition-all group",
+                  selectedUser?.id === u.id ? "bg-blue-50 text-blue-600 shadow-sm" : "hover:bg-slate-50 text-text-secondary"
+                )}
+              >
+                <div className="relative">
+                  {u.avatar_url ? (
+                    <img src={u.avatar_url} alt={u.username} className="w-12 h-12 rounded-2xl object-cover shadow-sm" />
                   ) : (
-                    <p className="text-xs text-text-secondary px-2 italic py-2">No users found</p>
+                    <div className="w-12 h-12 rounded-2xl bg-slate-100 flex items-center justify-center text-slate-400 border border-border-theme">
+                      <UserIcon className="w-6 h-6" />
+                    </div>
                   )}
-                </>
-              ) : (
-                <>
-                  {onlineUsers.filter(u => u.user_id !== user.id).map((u, i) => (
-                    <button 
-                      key={i} 
-                      onClick={() => setSelectedUser({ id: u.user_id, username: u.username, avatar_url: null, last_seen: null })}
-                      className={cn(
-                        "w-full flex items-center gap-3 p-3 rounded-lg transition-all text-left",
-                        selectedUser?.id === u.user_id ? "bg-accent-soft text-accent-theme shadow-sm" : "hover:bg-slate-50 text-text-primary"
-                      )}
-                    >
-                      <div className="relative">
-                        <div className="w-8 h-8 rounded-full bg-slate-300 flex items-center justify-center text-white font-bold text-xs uppercase">
-                          {u.username?.[0] || '?'}
-                        </div>
-                        <div className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-online border-2 border-white rounded-full"></div>
-                      </div>
-                      <div className="flex flex-col min-w-0">
-                        <span className="text-sm font-bold truncate">{u.username}</span>
-                        <span className="text-[10px] opacity-70">
-                          {u.is_typing ? "typing..." : "Online"}
-                        </span>
-                      </div>
-                    </button>
-                  ))}
-                  {onlineUsers.filter(u => u.user_id !== user.id).length === 0 && (
-                    <p className="text-xs text-text-secondary px-2 italic py-2">No other users online</p>
-                  )}
-                </>
-              )}
+                  <div className="absolute -bottom-1 -right-1 w-4 h-4 bg-white rounded-full flex items-center justify-center shadow-sm">
+                    <div className="w-2.5 h-2.5 bg-online rounded-full border-2 border-white" />
+                  </div>
+                </div>
+                <div className="flex-1 text-left truncate">
+                  <div className="flex items-center justify-between mb-0.5">
+                    <p className="font-bold text-sm truncate">{u.username}</p>
+                    {lastMsg && (
+                      <span className="text-[9px] opacity-50 font-medium">
+                        {format(new Date(lastMsg.created_at), 'HH:mm')}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] opacity-60 truncate leading-tight">
+                    {lastMsg ? (
+                      lastMsg.sender_id === user.id ? `You: ${lastMsg.content}` : lastMsg.content
+                    ) : (u.bio || 'No messages yet')}
+                  </p>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="p-4 border-t border-border-theme bg-slate-50/50">
+          <div className="flex items-center gap-3 p-2">
+            {profile?.avatar_url ? (
+              <img src={profile.avatar_url} alt="Me" className="w-10 h-10 rounded-xl object-cover" />
+            ) : (
+              <div className="w-10 h-10 rounded-xl bg-white flex items-center justify-center text-slate-400 border border-border-theme">
+                <UserIcon className="w-5 h-5" />
+              </div>
+            )}
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-bold text-text-primary truncate">{profile?.username || 'User'}</p>
+              <p className="text-[10px] text-text-secondary uppercase font-bold tracking-tighter">My Profile</p>
             </div>
           </div>
         </div>
-          <div className="p-6 border-t border-border-theme bg-white">
-            <div className="flex items-center gap-3 mb-4 group cursor-pointer" onClick={() => setShowProfileSettings(true)}>
-              <div className="relative">
-                {profile?.avatar_url ? (
-                  <img src={profile.avatar_url} alt="Avatar" className="w-10 h-10 rounded-full object-cover border border-slate-200" />
-                ) : (
-                  <div className="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center text-slate-600">
-                    <UserIcon className="w-6 h-6" />
-                  </div>
-                )}
-                <div className="absolute -top-1 -right-1 bg-accent-theme text-white p-1 rounded-full opacity-0 group-hover:opacity-100 transition-opacity">
-                  <Settings className="w-3 h-3" />
-                </div>
-              </div>
-              <div className="flex flex-col overflow-hidden">
-                <span className="text-sm font-bold text-text-primary truncate">{profile?.username || 'User'}</span>
-                <span className="text-xs text-text-secondary truncate">{user.email}</span>
-              </div>
-            </div>
-            <button 
-              onClick={handleSignOut}
-              className="w-full flex items-center justify-center gap-2 py-2.5 text-sm font-semibold text-red-500 hover:bg-red-50 rounded-xl transition-colors border border-transparent hover:border-red-100"
-            >
-              <LogOut className="w-4 h-4" />
-              Sign Out
-            </button>
-          </div>
-        </aside>
-
-        {/* Profile Settings Modal */}
-        {showProfileSettings && (
-          <ProfileSettings 
-            profile={profile} 
-            onClose={() => setShowProfileSettings(false)} 
-            onUpdate={(updated) => setProfile(updated)}
-            userId={user.id}
-          />
-        )}
+      </aside>
 
       {/* Main Chat Area */}
-      <main className="flex-1 flex flex-col min-w-0 h-full relative">
-        {/* Mobile Overlay */}
-        {showSidebar && (
-          <div 
-            className="absolute inset-0 bg-black/20 backdrop-blur-sm z-40 md:hidden"
-            onClick={() => setShowSidebar(false)}
-          />
-        )}
-
-        {!selectedUser ? (
-          <div className="flex-1 flex flex-col items-center justify-center bg-bg-main p-8 text-center">
-            <div className="md:hidden absolute top-4 left-4">
-              <button 
-                onClick={() => setShowSidebar(true)}
-                className="p-3 bg-white shadow-sm border border-border-theme rounded-xl text-text-primary"
-              >
-                <Menu className="w-6 h-6" />
-              </button>
-            </div>
-            <div className="bg-accent-soft w-24 h-24 rounded-3xl flex items-center justify-center mb-6">
-              <MessageSquare className="w-12 h-12 text-accent-theme" />
-            </div>
-            <h2 className="text-2xl font-bold text-text-primary mb-2">Welcome to Chatify</h2>
-            <p className="text-text-secondary max-w-xs">Select a friend from the sidebar to start a private conversation.</p>
-          </div>
-        ) : (
-          <>
-            {/* Header */}
-            <header className="h-[70px] border-b border-border-theme flex items-center justify-between px-4 md:px-8 shrink-0 bg-white z-10">
-              <div className="flex items-center gap-3 min-w-0">
-                <button 
-                  onClick={() => setShowSidebar(true)}
-                  className="md:hidden p-2 -ml-2 text-text-secondary hover:bg-slate-50 rounded-lg"
-                >
-                  <Menu className="w-6 h-6" />
-                </button>
-                <div className="room-info min-w-0">
-                  <h2 className="text-sm md:text-base font-bold text-text-primary flex items-center gap-2 truncate">
-                    <div className="w-2 h-2 bg-online rounded-full shrink-0"></div>
-                    <span className="truncate">Chat with {selectedUser.username}</span>
-                    <span className="hidden sm:inline-block text-[10px] uppercase tracking-wider px-2 py-0.5 bg-slate-100 text-text-secondary rounded font-bold shrink-0">
-                      Private
-                    </span>
-                  </h2>
-                  <p className="text-[10px] md:text-xs text-text-secondary truncate">
-                    End-to-end secure messaging
-                  </p>
-                </div>
-              </div>
-              <div className="flex items-center gap-2 md:gap-4">
-                <button className="text-text-secondary hover:text-text-primary p-2" onClick={handleSignOut}>
-                  <LogOut className="w-5 h-5" />
-                </button>
-              </div>
-            </header>
-
-            {/* Messages */}
-            <div className="flex-1 overflow-y-auto p-4 md:p-8 space-y-5 scroll-smooth bg-bg-main">
-              {messages.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full text-text-secondary opacity-40 space-y-4">
-                  <MessageSquare className="w-16 h-16" />
-                  <p className="text-sm font-medium">No messages yet. Say hi!</p>
-                </div>
-              ) : (
-                messages.map((msg) => {
-                  const isOwn = msg.user_id === user.id;
-                  return (
-                    <div 
-                      key={msg.id} 
-                      className={cn(
-                        "flex flex-col max-w-[85%] md:max-w-[70%]",
-                        isOwn ? "ml-auto items-end sent" : "mr-auto items-start received"
-                      )}
-                    >
-                      <div className={cn(
-                        "msg-meta text-[11px] text-text-secondary mb-1 px-1",
-                        isOwn ? "text-right" : "text-left"
-                      )}>
-                        {!isOwn && (
-                          <span className="font-bold mr-1">
-                            {msg.profiles?.username || 'Unknown'} •
-                          </span>
-                        )}
-                        <span>
-                          {format(new Date(msg.created_at), 'h:mm a')}
-                        </span>
-                      </div>
-                      <div 
-                        className={cn(
-                          "bubble px-3 py-2 md:px-4 md:py-3 rounded-2xl text-sm shadow-sm leading-relaxed relative group/msg",
-                          isOwn 
-                            ? "bg-accent-theme text-white rounded-br-none" 
-                            : "bg-white text-text-primary border border-border-theme rounded-bl-none"
-                        )}
-                      >
-                        {msg.image_url && (
-                          <img 
-                            src={msg.image_url} 
-                            alt="Shared image" 
-                            className="rounded-lg mb-2 max-w-full h-auto border border-black/5"
-                            referrerPolicy="no-referrer"
-                          />
-                        )}
-                        {msg.audio_url && (
-                          <div className="flex items-center gap-3 py-1">
-                            <audio src={msg.audio_url} controls className="h-8 w-40 md:w-48" />
-                          </div>
-                        )}
-                        <div className="break-words">
-                          {msg.content}
-                        </div>
-
-                    {/* Reaction Trigger Button (Mobile friendly) */}
-                    <button 
-                      className={cn(
-                        "absolute -top-3 p-1 rounded-full bg-white border border-border-theme shadow-sm opacity-0 group-hover/msg:opacity-100 transition-opacity z-10 hover:scale-110",
-                        isOwn ? "-left-3" : "-right-3"
-                      )}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        // Toggle logic could go here if we had a state for active reaction menu
-                      }}
-                    >
-                      <Smile className="w-3 h-3 text-text-secondary" />
-                    </button>
-
-                    {/* Quick Reactions Tooltip */}
-                    <div className={cn(
-                      "absolute -top-10 bg-white border border-border-theme shadow-xl rounded-full px-2 py-1.5 flex gap-1.5 opacity-0 group-hover/msg:opacity-100 transition-all z-20 scale-90 group-hover/msg:scale-100 origin-bottom",
-                      isOwn ? "right-0" : "left-0"
-                    )}>
-                      {['❤️', '👍', '😂', '😮', '😢', '🔥'].map(emoji => (
-                        <button 
-                          key={emoji}
-                          onClick={() => handleReaction(msg.id, emoji)}
-                          className="hover:scale-125 transition-transform p-1 grayscale hover:grayscale-0 text-base"
-                        >
-                          {emoji}
-                        </button>
-                      ))}
-                    </div>
-
-                    {/* Displayed Reactions */}
-                    {msg.reactions && msg.reactions.length > 0 && (
-                      <div className={cn(
-                        "absolute -bottom-5 flex flex-wrap gap-1 z-10",
-                        isOwn ? "right-0 justify-end" : "left-0 justify-start"
-                      )}>
-                        {Object.entries(
-                          msg.reactions.reduce((acc, r) => {
-                            acc[r.emoji] = (acc[r.emoji] || 0) + 1;
-                            return acc;
-                          }, {} as Record<string, number>)
-                        ).map(([emoji, count]) => {
-                          const hasReacted = msg.reactions?.some(r => r.user_id === user.id && r.emoji === emoji);
-                          return (
-                            <button
-                              key={emoji}
-                              onClick={() => handleReaction(msg.id, emoji)}
-                              className={cn(
-                                "flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] border transition-all shadow-sm",
-                                hasReacted 
-                                  ? "bg-accent-soft border-accent-theme text-accent-theme font-bold" 
-                                  : "bg-white border-border-theme text-text-secondary hover:border-slate-300"
-                              )}
-                            >
-                              <span>{emoji}</span>
-                              <span>{count}</span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
+      <main className="flex-1 flex flex-col min-w-0 bg-bg-main relative">
+        <header className="h-20 bg-white border-b border-border-theme flex items-center justify-between px-6 sticky top-0 z-20">
+          <div className="flex items-center gap-4">
+            <button onClick={() => setShowSidebar(true)} className="md:hidden p-2 hover:bg-slate-100 rounded-xl transition-colors">
+              <Menu className="w-6 h-6 text-text-secondary" />
+            </button>
+            {selectedUser && (
+              <div className="flex items-center gap-3">
+                {selectedUser.avatar_url ? (
+                  <img src={selectedUser.avatar_url} alt={selectedUser.username} className="w-10 h-10 rounded-xl object-cover shadow-sm" />
+                ) : (
+                  <div className="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center text-slate-400 border border-border-theme">
+                    <UserIcon className="w-5 h-5" />
+                  </div>
+                )}
+                <div>
+                  <h2 className="font-bold text-text-primary leading-none mb-1">{selectedUser.username}</h2>
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-1.5 h-1.5 bg-online rounded-full" />
+                    <p className="text-[10px] text-text-secondary font-bold uppercase tracking-widest">Online Now</p>
                   </div>
                 </div>
-              );
-            })
-          )}
-          
-          {/* Typing Indicator */}
-          <div className="typing-indicator h-5 px-1">
-            {typingUsers.length > 0 && (
-              <div className="flex items-center gap-2 text-text-secondary text-xs italic">
-                <span>
-                  {typingUsers.length === 1 
-                    ? `${typingUsers[0]} is typing...` 
-                    : `${typingUsers.length} people are typing...`}
-                </span>
               </div>
             )}
           </div>
-          
-          <div ref={messagesEndRef} />
-        </div>
-
-        {/* Input */}
-        <footer className="px-4 md:px-8 py-4 bg-white border-t border-border-theme shrink-0">
-          {(imagePreview || audioBlob) && (
-            <div className="mb-4 flex flex-wrap gap-4 items-end">
-              {imagePreview && (
-                <div className="relative inline-block">
-                  <img src={imagePreview} alt="Preview" className="w-24 h-24 md:w-32 md:h-32 object-cover rounded-xl border border-border-theme shadow-sm" />
-                  <button 
-                    onClick={() => { setImagePreview(null); setSelectedFile(null); }}
-                    className="absolute -top-2 -right-2 bg-red-500 text-white p-1 rounded-full shadow-md hover:bg-red-600 transition-colors"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
+          {selectedUser && (
+            <button 
+              onClick={() => setShowUserInfo(!showUserInfo)}
+              className={cn(
+                "p-2 rounded-xl transition-colors",
+                showUserInfo ? "bg-blue-50 text-blue-600" : "hover:bg-slate-100 text-text-secondary"
               )}
-              {audioBlob && (
-                <div className="relative bg-accent-soft p-3 md:p-4 rounded-xl border border-accent-theme flex items-center gap-2 md:gap-3">
-                  <div className="bg-accent-theme p-1.5 md:p-2 rounded-full text-white">
-                    <Mic className="w-3 h-3 md:w-4 md:h-4" />
-                  </div>
-                  <span className="text-xs md:text-sm font-bold text-accent-theme">Voice Ready</span>
-                  <button 
-                    onClick={() => setAudioBlob(null)}
-                    className="p-1 hover:bg-red-100 text-red-500 rounded-full transition-colors"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
-          
-          <form onSubmit={handleSendMessage} className="flex items-center gap-2 md:gap-4">
-            <div className="flex items-center gap-0.5 md:gap-1">
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="p-2 md:p-3 text-text-secondary hover:text-accent-theme hover:bg-accent-soft rounded-xl transition-all"
-                title="Upload image"
-              >
-                <ImageIcon className="w-5 h-5" />
-              </button>
-              
-              {isRecording ? (
-                <button
-                  type="button"
-                  onClick={stopRecording}
-                  className="p-2 md:p-3 text-red-500 bg-red-50 rounded-xl animate-pulse flex items-center gap-1 md:gap-2"
-                  title="Stop recording"
-                >
-                  <Square className="w-4 h-4 md:w-5 md:h-5 fill-current" />
-                  <span className="text-[10px] md:text-xs font-bold">{formatDuration(recordingDuration)}</span>
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={startRecording}
-                  className="p-2 md:p-3 text-text-secondary hover:text-accent-theme hover:bg-accent-soft rounded-xl transition-all"
-                  title="Record voice message"
-                >
-                  <Mic className="w-5 h-5" />
-                </button>
-              )}
-            </div>
-
-            <input 
-              type="file" 
-              ref={fileInputRef} 
-              onChange={handleImageSelect} 
-              accept="image/*" 
-              className="hidden" 
-            />
-            
-            <div className="flex-1 bg-bg-main border border-border-theme rounded-xl px-3 md:px-5 py-2 md:py-3 transition-all focus-within:border-accent-theme focus-within:ring-1 focus-within:ring-accent-theme">
-              <input
-                type="text"
-                value={newMessage}
-                onChange={(e) => {
-                  setNewMessage(e.target.value);
-                  handleTyping();
-                }}
-                onBlur={stopTyping}
-                placeholder={selectedUser ? `Message...` : "Type here..."}
-                className="w-full bg-transparent border-none text-sm text-text-primary placeholder:text-text-secondary outline-none"
-              />
-            </div>
-            <button
-              type="submit"
-              disabled={(!newMessage.trim() && !selectedFile && !audioBlob) || uploading}
-              className="bg-accent-theme hover:bg-blue-600 disabled:opacity-50 text-white p-3 md:px-6 md:py-3 rounded-xl font-bold text-sm transition-all shadow-sm flex-shrink-0 flex items-center gap-2"
             >
-              {uploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-              <span className="hidden md:inline">Send</span>
+              <MoreVertical className="w-5 h-5" />
             </button>
-          </form>
-        </footer>
-      </>
-    )}
-  </main>
-</div>
+          )}
+        </header>
+
+        {selectedUser ? (
+          <div className="flex-1 flex overflow-hidden">
+            <div className="flex-1 flex flex-col min-w-0">
+              <div className="flex-1 overflow-y-auto p-6 space-y-4 custom-scrollbar">
+                {messages.map((msg, idx) => {
+                  const isOwn = msg.sender_id === user.id;
+                  const isNextFromSame = idx < messages.length - 1 && messages[idx + 1].sender_id === msg.sender_id;
+                  const showDate = idx === 0 || format(new Date(messages[idx - 1].created_at), 'yyyy-MM-dd') !== format(new Date(msg.created_at), 'yyyy-MM-dd');
+
+                  return (
+                    <div key={msg.id} className={cn("flex flex-col", !isNextFromSame ? "mb-4" : "mb-1")}>
+                      {showDate && (
+                        <div className="flex justify-center my-8">
+                          <span className="px-4 py-1.5 bg-white border border-border-theme rounded-full text-[10px] font-bold text-text-secondary uppercase tracking-widest shadow-sm">
+                            {isToday(new Date(msg.created_at)) ? 'Today' : isYesterday(new Date(msg.created_at)) ? 'Yesterday' : format(new Date(msg.created_at), 'MMMM d, yyyy')}
+                          </span>
+                        </div>
+                      )}
+                      <div className={cn("flex items-end gap-2", isOwn ? "flex-row-reverse" : "flex-row")}>
+                        <div className={cn("max-w-[85%] md:max-w-[70%] flex flex-col", isOwn ? "items-end" : "items-start")}>
+                          <div className={cn(
+                            "px-4 py-2.5 rounded-2xl shadow-sm relative overflow-hidden",
+                            isOwn ? "bg-blue-600 text-white rounded-br-none" : "bg-white text-text-primary border border-border-theme rounded-bl-none"
+                          )}>
+                            {msg.image_url && (
+                              <img src={msg.image_url} alt="Shared" className="rounded-xl max-w-full mb-2 cursor-pointer" onClick={() => window.open(msg.image_url!, '_blank')} />
+                            )}
+                            {msg.audio_url && (
+                              <audio controls className="max-w-full mb-2 h-10"><source src={msg.audio_url} type="audio/webm" /></audio>
+                            )}
+                            {msg.content && <p className="text-sm whitespace-pre-wrap break-words leading-relaxed">{msg.content}</p>}
+                            <div className={cn("flex items-center gap-1 mt-1", isOwn ? "justify-end" : "justify-start")}>
+                              <span className={cn("text-[10px] font-medium opacity-60")}>
+                                {format(new Date(msg.created_at), 'HH:mm')}
+                              </span>
+                              {isOwn && (
+                                <div className="flex items-center ml-0.5 opacity-60">
+                                  <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                                    <polyline points="20 6 9 17 4 12" />
+                                  </svg>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+                <div ref={messagesEndRef} />
+              </div>
+
+              <footer className="p-6 bg-white border-t border-border-theme">
+                {imagePreview && (
+                  <div className="mb-4 relative inline-block animate-in slide-in-from-bottom-2">
+                    <img src={imagePreview} alt="Preview" className="w-32 h-32 object-cover rounded-2xl border-2 border-blue-500 shadow-xl" />
+                    <button onClick={() => { setSelectedFile(null); setImagePreview(null); }} className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full p-1.5 shadow-lg hover:bg-red-600 transition-colors">
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
+
+                {audioBlob && (
+                  <div className="mb-4 p-4 bg-blue-50 rounded-2xl border border-blue-100 flex items-center justify-between animate-in slide-in-from-bottom-2">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center text-white shadow-lg shadow-blue-100">
+                        <Play className="w-5 h-5" />
+                      </div>
+                      <span className="text-sm font-bold text-blue-600">Voice Message Recorded</span>
+                    </div>
+                    <button onClick={() => setAudioBlob(null)} className="p-2 hover:bg-blue-100 rounded-xl text-blue-600 transition-colors">
+                      <X className="w-5 h-5" />
+                    </button>
+                  </div>
+                )}
+
+                <form onSubmit={handleSendMessage} className="flex items-end gap-3 bg-slate-50 p-2 rounded-[2rem] border border-slate-200 focus-within:border-blue-300 focus-within:ring-4 focus-within:ring-blue-50 transition-all">
+                  <div className="flex items-center gap-1 pl-2">
+                    <button type="button" onClick={() => fileInputRef.current?.click()} className="p-2.5 hover:bg-white hover:shadow-sm rounded-xl text-text-secondary transition-all">
+                      <ImageIcon className="w-5 h-5" />
+                    </button>
+                    <input type="file" ref={fileInputRef} onChange={handleImageSelect} accept="image/*" className="hidden" />
+                  </div>
+
+                  <textarea
+                    value={newMessage}
+                    onChange={(e) => setNewMessage(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(e); } }}
+                    placeholder={`Message ${selectedUser.username}...`}
+                    className="flex-1 bg-transparent border-none focus:ring-0 text-sm py-3 px-2 resize-none max-h-32 min-h-[44px] custom-scrollbar"
+                    rows={1}
+                  />
+
+                  <div className="flex items-center gap-1 pr-2">
+                    {isRecording ? (
+                      <div className="flex items-center gap-3 px-4 py-2 bg-red-50 text-red-500 rounded-2xl border border-red-100 animate-pulse">
+                        <div className="w-2 h-2 bg-red-500 rounded-full" />
+                        <span className="text-xs font-bold tabular-nums">{Math.floor(recordingDuration / 60)}:{(recordingDuration % 60).toString().padStart(2, '0')}</span>
+                        <button type="button" onClick={stopRecording} className="p-1 hover:bg-red-100 rounded-lg transition-colors"><Square className="w-4 h-4 fill-current" /></button>
+                      </div>
+                    ) : (
+                      !newMessage.trim() && !selectedFile && !audioBlob ? (
+                        <button type="button" onClick={startRecording} className="p-2.5 hover:bg-white hover:shadow-sm rounded-xl text-text-secondary transition-all"><Mic className="w-5 h-5" /></button>
+                      ) : (
+                        <button type="submit" disabled={uploading} className="p-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl transition-all shadow-lg shadow-blue-100 disabled:opacity-50">
+                          {uploading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
+                        </button>
+                      )
+                    )}
+                  </div>
+                </form>
+              </footer>
+            </div>
+
+            {/* User Info Sidebar */}
+            {showUserInfo && (
+              <aside className="w-80 bg-white border-l border-border-theme flex flex-col animate-in slide-in-from-right duration-300 hidden lg:flex">
+                <div className="p-6 border-b border-border-theme flex items-center justify-between">
+                  <h3 className="font-bold text-text-primary">User Info</h3>
+                  <button onClick={() => setShowUserInfo(false)} className="p-2 hover:bg-slate-100 rounded-xl transition-colors">
+                    <X className="w-5 h-5 text-text-secondary" />
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto p-6 space-y-8 custom-scrollbar">
+                  <div className="text-center">
+                    {selectedUser.avatar_url ? (
+                      <img src={selectedUser.avatar_url} alt={selectedUser.username} className="w-32 h-32 rounded-[2.5rem] object-cover mx-auto mb-4 shadow-xl border-4 border-white" />
+                    ) : (
+                      <div className="w-32 h-32 rounded-[2.5rem] bg-slate-100 flex items-center justify-center text-slate-400 mx-auto mb-4 border border-border-theme">
+                        <UserIcon className="w-12 h-12" />
+                      </div>
+                    )}
+                    <h4 className="text-xl font-bold text-text-primary">{selectedUser.username}</h4>
+                    <p className="text-xs text-online font-bold uppercase tracking-widest mt-1">Online</p>
+                  </div>
+
+                  <div className="space-y-4">
+                    <div>
+                      <h5 className="text-[10px] font-bold text-text-secondary uppercase tracking-widest mb-2">About</h5>
+                      <p className="text-sm text-text-primary leading-relaxed bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                        {selectedUser.bio || "No bio available for this user."}
+                      </p>
+                    </div>
+                    <div>
+                      <h5 className="text-[10px] font-bold text-text-secondary uppercase tracking-widest mb-2">Shared Media</h5>
+                      <div className="grid grid-cols-3 gap-2">
+                        {messages.filter(m => m.image_url).slice(-6).map(m => (
+                          <img 
+                            key={m.id} 
+                            src={m.image_url!} 
+                            alt="Shared" 
+                            className="w-full aspect-square object-cover rounded-xl cursor-pointer hover:opacity-80 transition-opacity"
+                            onClick={() => window.open(m.image_url!, '_blank')}
+                          />
+                        ))}
+                        {messages.filter(m => m.image_url).length === 0 && (
+                          <div className="col-span-3 py-8 text-center bg-slate-50 rounded-2xl border border-dashed border-slate-200">
+                            <ImageIcon className="w-6 h-6 text-slate-300 mx-auto mb-2" />
+                            <p className="text-[10px] text-slate-400 font-bold uppercase">No media shared</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </aside>
+            )}
+          </div>
+        ) : (
+          <div className="flex-1 flex flex-col items-center justify-center p-8 text-center bg-bg-main">
+            <div className="bg-white p-12 rounded-[3.5rem] shadow-2xl border border-border-theme max-w-md w-full relative overflow-hidden group">
+              <div className="absolute top-0 left-0 w-full h-2 bg-blue-600" />
+              <div className="bg-blue-50 w-24 h-24 rounded-[2.5rem] flex items-center justify-center mx-auto mb-8 group-hover:scale-110 group-hover:rotate-6 transition-all duration-500">
+                <MessageSquare className="w-12 h-12 text-blue-600" />
+              </div>
+              <h2 className="text-3xl font-bold text-text-primary mb-4 tracking-tight">Start a Conversation</h2>
+              <p className="text-text-secondary mb-10 leading-relaxed">
+                Select a user from the sidebar to begin a private, secure chat.
+              </p>
+              <div className="flex items-center justify-center gap-2 text-[10px] font-bold text-blue-600 uppercase tracking-widest">
+                <Globe className="w-3 h-3" />
+                <span>End-to-End Encrypted</span>
+              </div>
+            </div>
+          </div>
+        )}
+      </main>
+    </div>
   );
 }
