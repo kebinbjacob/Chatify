@@ -24,7 +24,8 @@ import {
   Pause,
   Trash2,
   Smile,
-  Search
+  Search,
+  Menu
 } from 'lucide-react';
 import { format } from 'date-fns';
 
@@ -440,6 +441,7 @@ function ChatScreen({ session }: { session: any }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<Profile[]>([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [showSidebar, setShowSidebar] = useState(true);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -449,110 +451,10 @@ function ChatScreen({ session }: { session: any }) {
 
   const user = session.user;
 
-  // Fetch initial messages and profile
+  // Presence and Typing
   useEffect(() => {
-    const fetchData = async () => {
-      // Fetch profile
-      const { data: profileData } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', user.id)
-        .single();
-      
-      setProfile(profileData);
+    if (!profile) return;
 
-      // Fetch last 50 messages for the current context
-      let query = supabase
-        .from('messages')
-        .select('*, profiles:profiles!user_id(*), reactions(*)')
-        .order('created_at', { ascending: false })
-        .limit(50);
-
-      if (selectedUser) {
-        query = query.or(`and(user_id.eq.${user.id},receiver_id.eq.${selectedUser.id}),and(user_id.eq.${selectedUser.id},receiver_id.eq.${user.id})`);
-      } else {
-        // No global chat, return empty
-        setMessages([]);
-        return;
-      }
-
-      const { data: messagesData } = await query;
-
-      if (messagesData) {
-        setMessages(messagesData.reverse());
-      }
-    };
-
-    fetchData();
-
-    // Subscribe to messages
-    if (!selectedUser) {
-      setMessages([]);
-      return;
-    }
-
-    const messageChannel = supabase
-      .channel(`room:${selectedUser.id}`)
-      .on(
-        'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'messages' },
-        async (payload) => {
-          const newMsg = payload.new as Message;
-          
-          // Check if message belongs to current DM conversation
-          const isDMView = (
-            (newMsg.user_id === user.id && newMsg.receiver_id === selectedUser.id) ||
-            (newMsg.user_id === selectedUser.id && newMsg.receiver_id === user.id)
-          );
-
-          if (isDMView) {
-            // Fetch the full message with profile and reactions
-            const { data: newMsgWithProfile, error } = await supabase
-              .from('messages')
-              .select('*, profiles:profiles!user_id(*), reactions(*)')
-              .eq('id', newMsg.id)
-              .single();
-
-            if (newMsgWithProfile && !error) {
-              setMessages((prev) => {
-                // Prevent duplicates
-                if (prev.some(m => m.id === newMsgWithProfile.id)) return prev;
-                return [...prev, newMsgWithProfile];
-              });
-            }
-          }
-        }
-      )
-      .subscribe((status) => {
-        if (status === 'SUBSCRIBED') {
-          console.log('Subscribed to messages for', selectedUser.username);
-        }
-      });
-
-    // Subscribe to reactions
-    const reactionChannel = supabase
-      .channel('public:reactions')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'reactions' },
-        async (payload) => {
-          const reaction = (payload.new || payload.old) as Reaction;
-          
-          // Refresh the specific message's reactions
-          const { data: updatedMsg } = await supabase
-            .from('messages')
-            .select('*, profiles:profiles!user_id(*), reactions(*)')
-            .eq('id', reaction.message_id)
-            .single();
-
-          if (updatedMsg) {
-            setMessages((prev) => prev.map(m => m.id === updatedMsg.id ? updatedMsg : m));
-          }
-        }
-      )
-      .subscribe();
-
-    // Presence and Typing
     const presenceChannel = supabase.channel('online-users', {
       config: {
         presence: {
@@ -577,7 +479,7 @@ function ChatScreen({ session }: { session: any }) {
         if (status === 'SUBSCRIBED') {
           await presenceChannel.track({
             user_id: user.id,
-            username: profile?.username || user.email?.split('@')[0],
+            username: profile.username,
             online_at: new Date().toISOString(),
             is_typing: false
           });
@@ -585,11 +487,118 @@ function ChatScreen({ session }: { session: any }) {
       });
 
     return () => {
-      supabase.removeChannel(messageChannel);
-      supabase.removeChannel(reactionChannel);
-      supabase.removeChannel(presenceChannel);
+      presenceChannel.unsubscribe();
     };
-  }, [user.id, profile?.username, selectedUser]);
+  }, [user.id, profile]);
+
+  // Message and Reaction Subscriptions
+  useEffect(() => {
+    const messageChannel = supabase
+      .channel('global-message-changes')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'messages' },
+        async (payload) => {
+          const newMsg = payload.new as Message;
+          
+          // We only care if the message is for us or from us
+          const involvesMe = newMsg.user_id === user.id || newMsg.receiver_id === user.id;
+          if (!involvesMe) return;
+
+          // If we are currently looking at this conversation, add it to the list
+          const isInCurrentConversation = selectedUser && (
+            (newMsg.user_id === user.id && newMsg.receiver_id === selectedUser.id) ||
+            (newMsg.user_id === selectedUser.id && newMsg.receiver_id === user.id)
+          );
+
+          if (isInCurrentConversation) {
+            const { data: newMsgWithProfile, error } = await supabase
+              .from('messages')
+              .select('*, profiles:profiles!user_id(*), reactions(*)')
+              .eq('id', newMsg.id)
+              .single();
+
+            if (newMsgWithProfile && !error) {
+              setMessages((prev) => {
+                if (prev.some(m => m.id === newMsgWithProfile.id)) return prev;
+                return [...prev, newMsgWithProfile];
+              });
+            }
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'reactions' },
+        async (payload) => {
+          const reaction = (payload.new || payload.old) as Reaction;
+          
+          // Refresh the specific message's reactions if it's in our current view
+          setMessages((prev) => {
+            const msgToUpdate = prev.find(m => m.id === reaction.message_id);
+            if (msgToUpdate) {
+              // Fetch updated message data
+              supabase
+                .from('messages')
+                .select('*, profiles:profiles!user_id(*), reactions(*)')
+                .eq('id', reaction.message_id)
+                .single()
+                .then(({ data }) => {
+                  if (data) {
+                    setMessages(current => current.map(m => m.id === data.id ? data : m));
+                  }
+                });
+            }
+            return prev;
+          });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      messageChannel.unsubscribe();
+    };
+  }, [user.id, selectedUser]);
+
+  // Fetch initial messages when selectedUser changes
+  useEffect(() => {
+    const fetchMessages = async () => {
+      if (!selectedUser) {
+        setMessages([]);
+        setShowSidebar(true);
+        return;
+      }
+
+      setShowSidebar(false);
+      const { data, error } = await supabase
+        .from('messages')
+        .select('*, profiles:profiles!user_id(*), reactions(*)')
+        .or(`and(user_id.eq.${user.id},receiver_id.eq.${selectedUser.id}),and(user_id.eq.${selectedUser.id},receiver_id.eq.${user.id})`)
+        .order('created_at', { ascending: false })
+        .limit(50);
+
+      if (!error && data) {
+        setMessages(data.reverse());
+      }
+    };
+
+    fetchMessages();
+  }, [user.id, selectedUser]);
+
+  // Fetch initial profile
+  useEffect(() => {
+    const fetchProfile = async () => {
+      const { data } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', user.id)
+        .single();
+      
+      if (data) setProfile(data);
+    };
+
+    fetchProfile();
+  }, [user.id]);
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -813,14 +822,23 @@ function ChatScreen({ session }: { session: any }) {
   };
 
   return (
-    <div className="flex h-screen bg-bg-main overflow-hidden font-sans">
+    <div className="flex h-screen bg-bg-main overflow-hidden font-sans relative">
       {/* Sidebar - Online Users */}
-      <aside className="hidden md:flex w-[280px] flex-col bg-sidebar-bg border-r border-border-theme">
-        <div className="p-6 border-b border-border-theme">
+      <aside className={cn(
+        "absolute inset-y-0 left-0 z-50 w-[280px] flex flex-col bg-sidebar-bg border-r border-border-theme transition-transform duration-300 ease-in-out md:relative md:translate-x-0",
+        showSidebar ? "translate-x-0" : "-translate-x-full"
+      )}>
+        <div className="p-6 border-b border-border-theme flex items-center justify-between">
           <h1 className="text-xl font-bold tracking-tight text-accent-theme flex items-center gap-2">
             <MessageSquare className="w-6 h-6" />
             Chatify
           </h1>
+          <button 
+            className="md:hidden p-2 text-text-secondary hover:bg-slate-100 rounded-lg"
+            onClick={() => setShowSidebar(false)}
+          >
+            <X className="w-5 h-5" />
+          </button>
         </div>
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
           {/* Search Bar */}
@@ -953,9 +971,25 @@ function ChatScreen({ session }: { session: any }) {
         )}
 
       {/* Main Chat Area */}
-      <main className="flex-1 flex flex-col min-w-0 h-full">
+      <main className="flex-1 flex flex-col min-w-0 h-full relative">
+        {/* Mobile Overlay */}
+        {showSidebar && (
+          <div 
+            className="absolute inset-0 bg-black/20 backdrop-blur-sm z-40 md:hidden"
+            onClick={() => setShowSidebar(false)}
+          />
+        )}
+
         {!selectedUser ? (
           <div className="flex-1 flex flex-col items-center justify-center bg-bg-main p-8 text-center">
+            <div className="md:hidden absolute top-4 left-4">
+              <button 
+                onClick={() => setShowSidebar(true)}
+                className="p-3 bg-white shadow-sm border border-border-theme rounded-xl text-text-primary"
+              >
+                <Menu className="w-6 h-6" />
+              </button>
+            </div>
             <div className="bg-accent-soft w-24 h-24 rounded-3xl flex items-center justify-center mb-6">
               <MessageSquare className="w-12 h-12 text-accent-theme" />
             </div>
@@ -965,28 +999,36 @@ function ChatScreen({ session }: { session: any }) {
         ) : (
           <>
             {/* Header */}
-            <header className="h-[70px] border-b border-border-theme flex items-center justify-between px-8 shrink-0 bg-white z-10">
-              <div className="room-info">
-                <h2 className="text-base font-bold text-text-primary flex items-center gap-2">
-                  <div className="w-2 h-2 bg-online rounded-full"></div>
-                  Chat with {selectedUser.username}
-                  <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 bg-slate-100 text-text-secondary rounded font-bold">
-                    Private
-                  </span>
-                </h2>
-                <p className="text-xs text-text-secondary">
-                  End-to-end secure messaging
-                </p>
+            <header className="h-[70px] border-b border-border-theme flex items-center justify-between px-4 md:px-8 shrink-0 bg-white z-10">
+              <div className="flex items-center gap-3 min-w-0">
+                <button 
+                  onClick={() => setShowSidebar(true)}
+                  className="md:hidden p-2 -ml-2 text-text-secondary hover:bg-slate-50 rounded-lg"
+                >
+                  <Menu className="w-6 h-6" />
+                </button>
+                <div className="room-info min-w-0">
+                  <h2 className="text-sm md:text-base font-bold text-text-primary flex items-center gap-2 truncate">
+                    <div className="w-2 h-2 bg-online rounded-full shrink-0"></div>
+                    <span className="truncate">Chat with {selectedUser.username}</span>
+                    <span className="hidden sm:inline-block text-[10px] uppercase tracking-wider px-2 py-0.5 bg-slate-100 text-text-secondary rounded font-bold shrink-0">
+                      Private
+                    </span>
+                  </h2>
+                  <p className="text-[10px] md:text-xs text-text-secondary truncate">
+                    End-to-end secure messaging
+                  </p>
+                </div>
               </div>
-              <div className="flex items-center gap-4">
-                <button className="md:hidden text-text-secondary hover:text-text-primary" onClick={handleSignOut}>
+              <div className="flex items-center gap-2 md:gap-4">
+                <button className="text-text-secondary hover:text-text-primary p-2" onClick={handleSignOut}>
                   <LogOut className="w-5 h-5" />
                 </button>
               </div>
             </header>
 
             {/* Messages */}
-            <div className="flex-1 overflow-y-auto p-8 space-y-5 scroll-smooth bg-bg-main">
+            <div className="flex-1 overflow-y-auto p-4 md:p-8 space-y-5 scroll-smooth bg-bg-main">
               {messages.length === 0 ? (
                 <div className="flex flex-col items-center justify-center h-full text-text-secondary opacity-40 space-y-4">
                   <MessageSquare className="w-16 h-16" />
@@ -999,7 +1041,7 @@ function ChatScreen({ session }: { session: any }) {
                     <div 
                       key={msg.id} 
                       className={cn(
-                        "flex flex-col max-w-[70%]",
+                        "flex flex-col max-w-[85%] md:max-w-[70%]",
                         isOwn ? "ml-auto items-end sent" : "mr-auto items-start received"
                       )}
                     >
@@ -1018,7 +1060,7 @@ function ChatScreen({ session }: { session: any }) {
                       </div>
                       <div 
                         className={cn(
-                          "bubble px-4 py-3 rounded-2xl text-sm shadow-sm leading-relaxed relative group/msg",
+                          "bubble px-3 py-2 md:px-4 md:py-3 rounded-2xl text-sm shadow-sm leading-relaxed relative group/msg",
                           isOwn 
                             ? "bg-accent-theme text-white rounded-br-none" 
                             : "bg-white text-text-primary border border-border-theme rounded-bl-none"
@@ -1034,10 +1076,12 @@ function ChatScreen({ session }: { session: any }) {
                         )}
                         {msg.audio_url && (
                           <div className="flex items-center gap-3 py-1">
-                            <audio src={msg.audio_url} controls className="h-8 w-48" />
+                            <audio src={msg.audio_url} controls className="h-8 w-40 md:w-48" />
                           </div>
                         )}
-                        {msg.content}
+                        <div className="break-words">
+                          {msg.content}
+                        </div>
 
                     {/* Reaction Trigger Button (Mobile friendly) */}
                     <button 
@@ -1123,12 +1167,12 @@ function ChatScreen({ session }: { session: any }) {
         </div>
 
         {/* Input */}
-        <footer className="px-8 py-4 bg-white border-t border-border-theme shrink-0">
+        <footer className="px-4 md:px-8 py-4 bg-white border-t border-border-theme shrink-0">
           {(imagePreview || audioBlob) && (
-            <div className="mb-4 flex gap-4 items-end">
+            <div className="mb-4 flex flex-wrap gap-4 items-end">
               {imagePreview && (
                 <div className="relative inline-block">
-                  <img src={imagePreview} alt="Preview" className="w-32 h-32 object-cover rounded-xl border border-border-theme shadow-sm" />
+                  <img src={imagePreview} alt="Preview" className="w-24 h-24 md:w-32 md:h-32 object-cover rounded-xl border border-border-theme shadow-sm" />
                   <button 
                     onClick={() => { setImagePreview(null); setSelectedFile(null); }}
                     className="absolute -top-2 -right-2 bg-red-500 text-white p-1 rounded-full shadow-md hover:bg-red-600 transition-colors"
@@ -1138,11 +1182,11 @@ function ChatScreen({ session }: { session: any }) {
                 </div>
               )}
               {audioBlob && (
-                <div className="relative bg-accent-soft p-4 rounded-xl border border-accent-theme flex items-center gap-3">
-                  <div className="bg-accent-theme p-2 rounded-full text-white">
-                    <Mic className="w-4 h-4" />
+                <div className="relative bg-accent-soft p-3 md:p-4 rounded-xl border border-accent-theme flex items-center gap-2 md:gap-3">
+                  <div className="bg-accent-theme p-1.5 md:p-2 rounded-full text-white">
+                    <Mic className="w-3 h-3 md:w-4 md:h-4" />
                   </div>
-                  <span className="text-sm font-bold text-accent-theme">Voice Message Ready</span>
+                  <span className="text-xs md:text-sm font-bold text-accent-theme">Voice Ready</span>
                   <button 
                     onClick={() => setAudioBlob(null)}
                     className="p-1 hover:bg-red-100 text-red-500 rounded-full transition-colors"
@@ -1154,12 +1198,12 @@ function ChatScreen({ session }: { session: any }) {
             </div>
           )}
           
-          <form onSubmit={handleSendMessage} className="flex items-center gap-4">
-            <div className="flex items-center gap-1">
+          <form onSubmit={handleSendMessage} className="flex items-center gap-2 md:gap-4">
+            <div className="flex items-center gap-0.5 md:gap-1">
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                className="p-3 text-text-secondary hover:text-accent-theme hover:bg-accent-soft rounded-xl transition-all"
+                className="p-2 md:p-3 text-text-secondary hover:text-accent-theme hover:bg-accent-soft rounded-xl transition-all"
                 title="Upload image"
               >
                 <ImageIcon className="w-5 h-5" />
@@ -1169,17 +1213,17 @@ function ChatScreen({ session }: { session: any }) {
                 <button
                   type="button"
                   onClick={stopRecording}
-                  className="p-3 text-red-500 bg-red-50 rounded-xl animate-pulse flex items-center gap-2"
+                  className="p-2 md:p-3 text-red-500 bg-red-50 rounded-xl animate-pulse flex items-center gap-1 md:gap-2"
                   title="Stop recording"
                 >
-                  <Square className="w-5 h-5 fill-current" />
-                  <span className="text-xs font-bold">{formatDuration(recordingDuration)}</span>
+                  <Square className="w-4 h-4 md:w-5 md:h-5 fill-current" />
+                  <span className="text-[10px] md:text-xs font-bold">{formatDuration(recordingDuration)}</span>
                 </button>
               ) : (
                 <button
                   type="button"
                   onClick={startRecording}
-                  className="p-3 text-text-secondary hover:text-accent-theme hover:bg-accent-soft rounded-xl transition-all"
+                  className="p-2 md:p-3 text-text-secondary hover:text-accent-theme hover:bg-accent-soft rounded-xl transition-all"
                   title="Record voice message"
                 >
                   <Mic className="w-5 h-5" />
@@ -1195,7 +1239,7 @@ function ChatScreen({ session }: { session: any }) {
               className="hidden" 
             />
             
-            <div className="flex-1 bg-bg-main border border-border-theme rounded-xl px-5 py-3 transition-all focus-within:border-accent-theme focus-within:ring-1 focus-within:ring-accent-theme">
+            <div className="flex-1 bg-bg-main border border-border-theme rounded-xl px-3 md:px-5 py-2 md:py-3 transition-all focus-within:border-accent-theme focus-within:ring-1 focus-within:ring-accent-theme">
               <input
                 type="text"
                 value={newMessage}
@@ -1204,17 +1248,17 @@ function ChatScreen({ session }: { session: any }) {
                   handleTyping();
                 }}
                 onBlur={stopTyping}
-                placeholder={selectedUser ? `Message ${selectedUser.username}...` : "Type your message here..."}
+                placeholder={selectedUser ? `Message...` : "Type here..."}
                 className="w-full bg-transparent border-none text-sm text-text-primary placeholder:text-text-secondary outline-none"
               />
             </div>
             <button
               type="submit"
               disabled={(!newMessage.trim() && !selectedFile && !audioBlob) || uploading}
-              className="bg-accent-theme hover:bg-blue-600 disabled:opacity-50 text-white px-6 py-3 rounded-xl font-bold text-sm transition-all shadow-sm flex-shrink-0 flex items-center gap-2"
+              className="bg-accent-theme hover:bg-blue-600 disabled:opacity-50 text-white p-3 md:px-6 md:py-3 rounded-xl font-bold text-sm transition-all shadow-sm flex-shrink-0 flex items-center gap-2"
             >
               {uploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-              Send
+              <span className="hidden md:inline">Send</span>
             </button>
           </form>
         </footer>
